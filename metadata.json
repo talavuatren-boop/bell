@@ -1,0 +1,6 @@
+{
+  "name": "HUNG CAM",
+  "description": "Professional Android camera with native Camera2 manual controls, real Live Photo, video stabilization, local AI studio, and media editors.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
