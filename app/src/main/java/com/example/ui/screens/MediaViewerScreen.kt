@@ -770,7 +770,12 @@ private fun LivePhotoViewerPane(
                                 surfaceTextureListener = object : TextureView.SurfaceTextureListener {
                                     override fun onSurfaceTextureAvailable(st: android.graphics.SurfaceTexture, w: Int, h: Int) {
                                         val mp = MediaPlayer().apply {
-                                            setDataSource(ctx, Uri.parse(asset.liveVideoUri))
+                                            val vUri = Uri.parse(asset.liveVideoUri)
+                                            if (vUri.scheme == "file" && !vUri.path.isNullOrBlank()) {
+                                                setDataSource(vUri.path)
+                                            } else {
+                                                setDataSource(ctx, vUri)
+                                            }
                                             setSurface(Surface(st))
                                             isLooping = false
                                             val vol = if (audioEnabled) 1f else 0f
@@ -961,7 +966,11 @@ private fun VideoPlayerPane(
 private fun readVideoDisplayAspect(context: android.content.Context, uri: Uri): Float? {
     return runCatching {
         val r = MediaMetadataRetriever()
-        r.setDataSource(context, uri)
+        if (uri.scheme == "file" && !uri.path.isNullOrBlank()) {
+            r.setDataSource(uri.path)
+        } else {
+            r.setDataSource(context, uri)
+        }
         val w = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
         val h = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
         val rot = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0

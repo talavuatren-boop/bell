@@ -902,11 +902,22 @@ class CameraEngine(
             builder.set(CaptureRequest.CONTROL_SCENE_MODE, CaptureRequest.CONTROL_SCENE_MODE_HDR)
         }
 
-        // Video target FPS
+        // Video target FPS (safely matched against supported CameraCharacteristics AE FPS ranges)
         if (currentMode == CameraMode.VIDEO || (currentMode == CameraMode.PRO && currentProCaptureType == ProCaptureType.VIDEO)) {
             val fps = currentSettings.videoFps
-            builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(fps, fps))
+            bestSupportedAeFpsRange(fps)?.let { range ->
+                builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, range)
+            }
         }
+    }
+
+    private fun bestSupportedAeFpsRange(targetFps: Int): Range<Int>? {
+        val ranges = activeCharacteristics?.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+        if (ranges.isNullOrEmpty()) return Range(targetFps, targetFps)
+        return ranges.firstOrNull { it.lower == targetFps && it.upper == targetFps }
+            ?: ranges.firstOrNull { it.upper == targetFps }
+            ?: ranges.filter { it.upper >= targetFps }.minByOrNull { it.upper - it.lower }
+            ?: ranges.maxByOrNull { it.upper * 100 + it.lower }
     }
 
     private val repeatingCaptureCallback = object : CameraCaptureSession.CaptureCallback() {
@@ -1091,7 +1102,8 @@ class CameraEngine(
                                 targetResolution = VideoResolutionPreset.RES_720P,
                                 targetFps = 30,
                                 muteAudio = !clip.hasAudio,
-                                filter = filterPreset
+                                filter = filterPreset,
+                                preserveSourceAspect = true
                             ),
                             mode = AiProcessingMode.FAST,
                             onProgress = { _, _ -> }
@@ -1102,21 +1114,18 @@ class CameraEngine(
                 } else {
                     clip.file
                 }
-                val uriRes = mediaRepo.saveVideoFileToMediaStore(
+                // Store Live Photo companion clip privately so phone's System Gallery NEVER sees a standalone MP4 video
+                val uriRes = mediaRepo.saveLiveCompanionClipPrivately(
                     sourceFile = uploadFile,
-                    width = clip.width,
-                    height = clip.height,
-                    fps = 30,
-                    bitrateBps = ring.bitrateBps,
-                    lensLabel = activeLens?.displayLabel ?: "Main",
-                    isLiveCompanion = true,
-                    livePairId = pairId
+                    pairId = pairId
                 )
                 uriRes.onSuccess { videoUri ->
+                    var existingImageUri: android.net.Uri? = null
                     livePairLinkMutex.withLock {
                         val db = com.example.data.HungCamDatabase.getInstance(context).mediaAssetDao()
                         val existing = db.getByLivePairId(pairId)
                         if (existing != null) {
+                            existingImageUri = android.net.Uri.parse(existing.mediaStoreUri)
                             db.update(
                                 existing.copy(
                                     mediaType = com.example.model.MediaItemType.LIVE_PHOTO.name,
@@ -1137,6 +1146,14 @@ class CameraEngine(
                                 shutterOffsetMs = clip.shutterOffsetMs
                             )
                         }
+                    }
+                    // Also embed MotionPhoto XMP + MP4 into the saved JPEG so System Gallery recognizes it as Live/Motion Photo
+                    if (existingImageUri != null) {
+                        mediaRepo.attachMotionPhotoToSavedImage(
+                            imageUri = existingImageUri!!,
+                            mp4File = uploadFile,
+                            shutterOffsetUs = clip.shutterOffsetMs * 1000L
+                        )
                     }
                 }
                 runCatching { filteredFile?.delete() }
@@ -1247,6 +1264,16 @@ class CameraEngine(
             captureWatchdogJob?.cancel()
             saveRes.first.onSuccess { saved ->
                 val pendingMeta = saveRes.second
+                if (pendingMeta != null) {
+                    val clipPath = android.net.Uri.parse(pendingMeta.videoUri).path
+                    if (!clipPath.isNullOrBlank()) {
+                        mediaRepo.attachMotionPhotoToSavedImage(
+                            imageUri = android.net.Uri.parse(saved.mediaStoreUri),
+                            mp4File = File(clipPath),
+                            shutterOffsetUs = pendingMeta.shutterOffsetMs * 1000L
+                        )
+                    }
+                }
                 _runtimeState.value = _runtimeState.value.copy(
                     isCapturing = false,
                     statusBanner = when {
@@ -1484,12 +1511,27 @@ class CameraEngine(
 
         val activePreviewSurface = getOrCreatePreviewSurface(st)
         val recSurface = recorder.surface
+        val map = activeCharacteristics?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+        val aeRanges = activeCharacteristics?.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES).orEmpty()
+        val aeSupportsTarget60 = targetFps >= 60 && aeRanges.any { it.upper >= 60 }
+        val highSpeed60Range = if (targetFps >= 60 && !aeSupportsTarget60) {
+            val hsSize = runCatching { map?.highSpeedVideoSizes?.firstOrNull { it.width == targetW && it.height == targetH } }.getOrNull()
+            if (hsSize != null) {
+                runCatching {
+                    map?.getHighSpeedVideoFpsRangesFor(hsSize)
+                        ?.filter { it.upper == 60 }
+                        ?.minByOrNull { it.upper - it.lower }
+                }.getOrNull()
+            } else null
+        } else null
 
-        if (isSlowMo && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+        if ((isSlowMo || highSpeed60Range != null) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val hsRange = highSpeed60Range ?: Range(targetFps, targetFps)
             val hsBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                 addTarget(activePreviewSurface)
                 addTarget(recSurface)
-                set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(targetFps, targetFps))
+                applyRequestParameters(this)
+                set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, hsRange)
             }
             @Suppress("DEPRECATION")
             device.createConstrainedHighSpeedCaptureSession(
@@ -1509,28 +1551,49 @@ class CameraEngine(
                 handler
             )
         } else {
+            val safeRange = bestSupportedAeFpsRange(targetFps)
             val recBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                 addTarget(activePreviewSurface)
                 addTarget(recSurface)
                 applyRequestParameters(this)
-                set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(targetFps, targetFps))
+                if (safeRange != null) {
+                    set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, safeRange)
+                }
             }
             previewRequestBuilder = recBuilder
-            @Suppress("DEPRECATION")
-            device.createCaptureSession(
-                listOf(activePreviewSurface, recSurface),
-                object : CameraCaptureSession.StateCallback() {
-                    override fun onConfigured(session: CameraCaptureSession) {
-                        captureSession = session
-                        session.setRepeatingRequest(recBuilder.build(), repeatingCaptureCallback, handler)
-                        beginRecorderStart()
+            val recCallback = object : CameraCaptureSession.StateCallback() {
+                override fun onConfigured(session: CameraCaptureSession) {
+                    captureSession = session
+                    session.setRepeatingRequest(recBuilder.build(), repeatingCaptureCallback, handler)
+                    beginRecorderStart()
+                }
+                override fun onConfigureFailed(session: CameraCaptureSession) {
+                    abortFailedRecording()
+                }
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && lens.physicalId != null) {
+                val outputConfigs = listOf(activePreviewSurface, recSurface).map { s ->
+                    OutputConfiguration(s).apply { runCatching { setPhysicalCameraId(lens.physicalId) } }
+                }
+                val sessionConfig = SessionConfiguration(
+                    SessionConfiguration.SESSION_REGULAR,
+                    outputConfigs,
+                    sessionExecutor,
+                    recCallback
+                )
+                runCatching { device.createCaptureSession(sessionConfig) }
+                    .onFailure {
+                        @Suppress("DEPRECATION")
+                        device.createCaptureSession(listOf(activePreviewSurface, recSurface), recCallback, handler)
                     }
-                    override fun onConfigureFailed(session: CameraCaptureSession) {
-                        abortFailedRecording()
-                    }
-                },
-                handler
-            )
+            } else {
+                @Suppress("DEPRECATION")
+                device.createCaptureSession(
+                    listOf(activePreviewSurface, recSurface),
+                    recCallback,
+                    handler
+                )
+            }
         }
     }
 
@@ -1626,12 +1689,14 @@ class CameraEngine(
                 var outFps = activeVideoFps
                 var outBitrate = activeVideoBitrate
 
+                var filterNotice: String? = null
                 if (recFilter != PhotoFilterPreset.NATURAL) {
                     _runtimeState.value = _runtimeState.value.copy(
                         statusBanner = "Applying ${recFilter.label} filter to video..."
                     )
                     runCatching {
                         val exportResPreset = when {
+                            activeVideoHeight >= 2000 -> VideoResolutionPreset.RES_4K
                             activeVideoHeight >= 1080 -> VideoResolutionPreset.RES_1080P
                             else -> VideoResolutionPreset.RES_720P
                         }
@@ -1642,7 +1707,8 @@ class CameraEngine(
                                 targetResolution = exportResPreset,
                                 targetFps = activeVideoFps.coerceIn(24, 60),
                                 muteAudio = recMuted,
-                                filter = recFilter
+                                filter = recFilter,
+                                preserveSourceAspect = true
                             ),
                             mode = AiProcessingMode.BALANCED,
                             onProgress = { pct, _ ->
@@ -1657,10 +1723,13 @@ class CameraEngine(
                         outH = processed.height
                         outFps = processed.fps
                         outBitrate = processed.bitrateBps
+                    }.onFailure { err ->
+                        filterNotice = err.localizedMessage
                     }
                 }
 
-                val filterLabel = if (recFilter != PhotoFilterPreset.NATURAL) recFilter.label else null
+                val appliedVideoFilter = recFilter != PhotoFilterPreset.NATURAL && filteredTempFile != null
+                val filterLabel = if (appliedVideoFilter) recFilter.label else null
                 val res = mediaRepo.saveVideoFileToMediaStore(
                     sourceFile = finalVideoFile,
                     width = outW,
@@ -1675,10 +1744,10 @@ class CameraEngine(
                 runCatching { videoFile.delete() }
                 res.onSuccess {
                     _runtimeState.value = _runtimeState.value.copy(
-                        statusBanner = if (filterLabel != null) {
-                            "Video saved (${outH}p ${outFps}fps • $filterLabel)"
-                        } else {
-                            "Video saved (${outH}p ${outFps}fps)"
+                        statusBanner = when {
+                            filterLabel != null -> "Video saved (${outH}p ${outFps}fps • $filterLabel)"
+                            filterNotice != null -> "Video saved (${outH}p ${outFps}fps • Filter skipped: $filterNotice)"
+                            else -> "Video saved (${outH}p ${outFps}fps)"
                         }
                     )
                 }.onFailure { err ->

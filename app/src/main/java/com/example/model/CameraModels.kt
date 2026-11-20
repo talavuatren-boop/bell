@@ -335,7 +335,8 @@ data class VideoEditConfig(
     val applyStabilization: Boolean = false,
     val applyDenoise: Boolean = false,
     val applySharpen: Boolean = false,
-    val applyAiColor: Boolean = false
+    val applyAiColor: Boolean = false,
+    val preserveSourceAspect: Boolean = false
 )
 
 data class AiProcessingProgress(

@@ -328,21 +328,16 @@ class LivePhotoRingBuffer(
 
         val selectedVideo = vSnapshot.subList(windowRange.first, windowRange.last + 1)
         val firstWallUs = selectedVideo.first().wallTimeUs
-        val lastWallUs = selectedVideo.last().wallTimeUs
-        val firstCodecPtsUs = selectedVideo.first().codecPtsUs
         val shutterOffsetMs = ((shutterMonotonicUs - firstWallUs) / 1000L).coerceAtLeast(0L)
-
-        // Detect if codecPtsUs advances properly across selected frames; otherwise fall back to wallTimeUs deltas
-        val codecSpanUs = selectedVideo.last().codecPtsUs - firstCodecPtsUs
-        val wallSpanUs = (lastWallUs - firstWallUs).coerceAtLeast(1L)
-        val useCodecDeltas = selectedVideo.size <= 1 || (codecSpanUs > wallSpanUs / 3L && codecSpanUs < wallSpanUs * 3L)
+        val videoRelPtsList = buildMonotonicVideoPtsUs(selectedVideo)
+        val totalSpanUs = videoRelPtsList.lastOrNull()?.coerceAtLeast(400_000L) ?: 400_000L
 
         return runCatching {
             val muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
             val vTrack = muxer.addTrack(vFmt)
             val aFmt = audioFormat
             val selectedAudio = if (aFmt != null && aSnapshot.isNotEmpty()) {
-                aSnapshot.filter { it.wallTimeUs in firstWallUs..lastWallUs }
+                aSnapshot.filter { it.wallTimeUs in firstWallUs..(selectedVideo.last().wallTimeUs + 60_000L) }
             } else {
                 emptyList()
             }
@@ -351,21 +346,26 @@ class LivePhotoRingBuffer(
             muxer.setOrientationHint(((orientationHint % 360) + 360) % 360)
             muxer.start()
             val info = MediaCodec.BufferInfo()
-            var lastWrittenV = -1L
-            for (pkt in selectedVideo) {
-                val rawRel = if (useCodecDeltas) (pkt.codecPtsUs - firstCodecPtsUs) else (pkt.wallTimeUs - firstWallUs)
-                val relPts = rawRel.coerceAtLeast(lastWrittenV + 1L)
-                lastWrittenV = relPts
+            for (i in selectedVideo.indices) {
+                val pkt = selectedVideo[i]
+                val relPts = videoRelPtsList[i]
                 info.set(0, pkt.data.size, relPts, pkt.flags)
                 muxer.writeSampleData(vTrack, java.nio.ByteBuffer.wrap(pkt.data), info)
             }
 
             if (aTrack >= 0) {
-                var lastWrittenA = -1L
-                for (pkt in selectedAudio) {
-                    val relPts = (pkt.wallTimeUs - firstWallUs).coerceAtLeast(lastWrittenA + 1L)
-                    lastWrittenA = relPts
-                    info.set(0, pkt.data.size, relPts, pkt.flags)
+                var relAudioUs = 0L
+                val maxAudioUs = totalSpanUs + 120_000L
+                for (i in selectedAudio.indices) {
+                    val pkt = selectedAudio[i]
+                    if (i == 0) {
+                        relAudioUs = (pkt.wallTimeUs - firstWallUs).coerceIn(0L, 120_000L)
+                    } else {
+                        val delta = (pkt.wallTimeUs - selectedAudio[i - 1].wallTimeUs).coerceIn(1_000L, 120_000L)
+                        relAudioUs = (relAudioUs + delta).coerceAtMost(maxAudioUs)
+                    }
+                    if (relAudioUs >= maxAudioUs && i > 0) break
+                    info.set(0, pkt.data.size, relAudioUs, pkt.flags)
                     muxer.writeSampleData(aTrack, java.nio.ByteBuffer.wrap(pkt.data), info)
                 }
             }
@@ -378,7 +378,7 @@ class LivePhotoRingBuffer(
                 width = width,
                 height = height,
                 shutterOffsetMs = shutterOffsetMs,
-                totalDurationMs = ((lastWallUs - firstWallUs) / 1000L).coerceAtLeast(400L),
+                totalDurationMs = (totalSpanUs / 1000L).coerceAtLeast(400L),
                 hasAudio = aTrack >= 0
             )
         }
@@ -447,6 +447,23 @@ class LivePhotoRingBuffer(
                 }
             }
             return startIdx..endIdx
+        }
+
+        fun buildMonotonicVideoPtsUs(frames: List<EncodedFrame>): List<Long> {
+            if (frames.isEmpty()) return emptyList()
+            val out = ArrayList<Long>(frames.size)
+            var relPts = 0L
+            out.add(0L)
+            for (i in 1 until frames.size) {
+                val cur = frames[i]
+                val prev = frames[i - 1]
+                val wallDelta = (cur.wallTimeUs - prev.wallTimeUs).coerceIn(1_000L, 250_000L)
+                val codecDelta = cur.codecPtsUs - prev.codecPtsUs
+                val step = if (codecDelta in 1_000L..250_000L) codecDelta else wallDelta
+                relPts += step
+                out.add(relPts)
+            }
+            return out
         }
     }
 }

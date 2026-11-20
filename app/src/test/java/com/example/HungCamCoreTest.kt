@@ -342,4 +342,130 @@ class HungCamCoreTest {
         val warmB = warmPx and 0xFF
         assertTrue("Expected WARM filter red > blue, got R=$warmR B=$warmB", warmR > warmB)
     }
+
+    @Test
+    fun `zoom stop presets include physical 0_6x ultrawide 1x main and 2x even when minZoom is 1_0`() {
+        val mainRear = com.example.model.CameraLensInfo(
+            cameraId = "0",
+            physicalId = null,
+            lensFacing = CameraCharacteristics.LENS_FACING_BACK,
+            displayLabel = "1x",
+            focalLengthMm = 6.1f,
+            aperture = 1.65f,
+            sensorOrientation = 90,
+            hardwareLevelLabel = "LEVEL_3",
+            hasFlash = true,
+            supportsManualSensor = true,
+            supportsRaw = true,
+            supportsHeic = true,
+            supportsOis = true,
+            supportsEis = true,
+            supportsHdrScene = true,
+            minZoom = 1.0f,
+            maxZoom = 10.0f,
+            isoRange = 50..6400,
+            exposureTimeRangeNs = 100_000L..30_000_000_000L,
+            evRange = -12..12,
+            evStep = 0.25f,
+            minFocusDistance = 10f,
+            maxPhotoWidth = 4080,
+            maxPhotoHeight = 3060,
+            standardPhotoWidth = 4080,
+            standardPhotoHeight = 3060,
+            supportedVideoProfiles = emptyList(),
+            supportedSlowMoModes = emptyList(),
+            sensorPhysicalWidthMm = 9.8f,
+            sensorPhysicalHeightMm = 7.35f,
+            equivalentFocalLengthMm = 23,
+            opticalZoomRatio = 1.0f,
+            isLogicalMultiCamera = false
+        )
+        val uwRear = mainRear.copy(
+            cameraId = "2",
+            displayLabel = "0.6x",
+            focalLengthMm = 1.65f,
+            aperture = 2.2f,
+            sensorPhysicalWidthMm = 3.6f,
+            sensorPhysicalHeightMm = 2.7f,
+            equivalentFocalLengthMm = 14,
+            opticalZoomRatio = 0.6f,
+            maxPhotoWidth = 3264,
+            maxPhotoHeight = 2448
+        )
+        val stops = HardwareCapabilityDetector.buildZoomStopPresets(listOf(mainRear, uwRear), mainRear)
+        val labels = stops.map { it.label }
+        assertEquals(listOf("0.6x", "1x", "2x", "5x"), labels)
+        assertEquals("2", stops.first { it.label == "0.6x" }.backingLens.cameraId)
+    }
+
+    @Test
+    fun `motion photo writer packages valid jpeg plus xmp offset and appended mp4 payload`() {
+        val bmp = Bitmap.createBitmap(64, 48, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(android.graphics.Color.rgb(40, 120, 200))
+        }
+        val jpgStream = java.io.ByteArrayOutputStream()
+        bmp.compress(Bitmap.CompressFormat.JPEG, 90, jpgStream)
+        val jpegBytes = jpgStream.toByteArray()
+        val fakeMp4 = "ftypmp42_fake_motion_clip_payload_123456".toByteArray()
+
+        val packaged = com.example.processing.MotionPhotoWriter.embedMotionPhoto(
+            jpegBytes = jpegBytes,
+            mp4Bytes = fakeMp4,
+            presentationTimestampUs = 1_500_000L
+        )
+        assertTrue(packaged.size > jpegBytes.size + fakeMp4.size)
+        val offset = com.example.processing.MotionPhotoWriter.extractEmbeddedMp4Offset(packaged)
+        assertEquals(fakeMp4.size, offset)
+
+        // Trailing bytes at end of JPEG must match MP4 byte-for-byte
+        val tail = packaged.copyOfRange(packaged.size - fakeMp4.size, packaged.size)
+        assertTrue(tail.contentEquals(fakeMp4))
+
+        // Standard Android JPEG decoders still decode the still image cleanly
+        val decoded = android.graphics.BitmapFactory.decodeByteArray(packaged, 0, packaged.size)
+        assertNotNull(decoded)
+        assertEquals(64, decoded.width)
+        assertEquals(48, decoded.height)
+    }
+
+    @Test
+    fun `live photo monotonic pts builder blocks 7 hour clock spikes`() {
+        val step = 33_333L
+        val sevenHoursUs = 7L * 3600L * 1_000_000L
+        val frames = List(90) { idx ->
+            com.example.camera.EncodedFrame(
+                data = byteArrayOf(1, 2, 3),
+                codecPtsUs = if (idx < 30) 1_000_000L + idx * step else sevenHoursUs + idx * step,
+                wallTimeUs = 5_000_000L + idx * step,
+                flags = if (idx == 0) 1 else 0
+            )
+        }
+        val pts = LivePhotoRingBuffer.buildMonotonicVideoPtsUs(frames)
+        assertEquals(90, pts.size)
+        assertEquals(0L, pts.first())
+        val totalSpanMs = pts.last() / 1000L
+        assertTrue("Expected ~3000ms clip even after 7h clock jump, got ${totalSpanMs}ms", totalSpanMs in 2700L..3400L)
+    }
+
+    @Test
+    fun `live photo companion clip saves in app private storage never public mediastore video`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, HungCamDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        val repo = com.example.data.MediaStoreRepository(context, db.mediaAssetDao())
+        val tempFile = java.io.File(context.cacheDir, "test_live_clip.mp4").apply {
+            writeBytes(ByteArray(2048) { it.toByte() })
+        }
+        val uriRes = repo.saveLiveCompanionClipPrivately(tempFile, "pair-private-123")
+        assertTrue("Expected private live clip save success, got ${uriRes.exceptionOrNull()}", uriRes.isSuccess)
+        val uri = uriRes.getOrThrow()
+        assertEquals("file", uri.scheme)
+        assertTrue(uri.path!!.contains("live_clips"))
+        assertTrue(java.io.File(uri.path!!).exists())
+
+        java.io.File(uri.path!!).delete()
+        tempFile.delete()
+        db.close()
+    }
 }

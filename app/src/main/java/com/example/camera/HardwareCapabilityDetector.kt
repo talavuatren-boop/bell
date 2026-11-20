@@ -7,6 +7,8 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.params.StreamConfigurationMap
+import android.media.CamcorderProfile
+import android.media.MediaCodecInfo
 import android.media.MediaCodecList
 import android.media.MediaRecorder
 import android.os.Build
@@ -46,11 +48,25 @@ class HardwareCapabilityDetector(private val context: Context) {
         val supportsHevc = encoders.any { it.contains("hevc", ignoreCase = true) || it.contains("h265", ignoreCase = true) }
 
         val lenses = mutableListOf<CameraLensInfo>()
-        val cameraIds = runCatching { cameraManager.cameraIdList }.getOrDefault(emptyArray())
+        val listedIds = runCatching { cameraManager.cameraIdList }.getOrDefault(emptyArray()).toList()
+        val listedSet = listedIds.toSet()
+        // Some OEM HALs (e.g. Xiaomi HyperOS/MIUI) keep ultrawide/tele IDs outside cameraIdList
+        val candidateIds = (listedIds + listOf("2", "3", "4", "5", "20", "21", "22", "23")).distinct()
 
-        for (id in cameraIds) {
+        for (id in candidateIds) {
             val chars = runCatching { cameraManager.getCameraCharacteristics(id) }.getOrNull() ?: continue
             val lensInfo = parseCameraCharacteristics(id, null, chars)
+            val isHiddenId = id !in listedSet
+            if (isHiddenId) {
+                val mp = lensInfo.maxPhotoWidth.toLong() * lensInfo.maxPhotoHeight.toLong()
+                val alreadyExists = lenses.any {
+                    it.lensFacing == lensInfo.lensFacing &&
+                        kotlin.math.abs(it.focalLengthMm - lensInfo.focalLengthMm) < 0.15f &&
+                        kotlin.math.abs(it.aperture - lensInfo.aperture) < 0.15f
+                }
+                // Ignore depth/IR/2MP macro hidden IDs and exact duplicates
+                if (alreadyExists || mp < 4_000_000L) continue
+            }
             lenses.add(lensInfo)
 
             // Also inspect physical sub-cameras when logical multi-camera is exposed (API 28+)
@@ -60,43 +76,48 @@ class HardwareCapabilityDetector(private val context: Context) {
                     if (lenses.none { it.cameraId == physId || it.physicalId == physId }) {
                         val physChars = runCatching { cameraManager.getCameraCharacteristics(physId) }.getOrNull()
                         if (physChars != null) {
-                            lenses.add(parseCameraCharacteristics(id, physId, physChars))
+                            val physInfo = parseCameraCharacteristics(id, physId, physChars)
+                            val physMp = physInfo.maxPhotoWidth.toLong() * physInfo.maxPhotoHeight.toLong()
+                            if (physMp >= 4_000_000L) {
+                                lenses.add(physInfo)
+                            }
                         }
                     }
                 }
             }
         }
 
-        // Sort cleanly: Back main/wide/tele first, then Front
-        val prelimSorted = lenses.sortedWith(
-            compareBy<CameraLensInfo> {
-                when (it.lensFacing) {
-                    CameraCharacteristics.LENS_FACING_BACK -> 0
-                    CameraCharacteristics.LENS_FACING_FRONT -> 1
-                    else -> 2
-                }
-            }.thenBy { it.physicalId != null }
-                .thenBy { it.focalLengthMm }
-        )
-
-        val mainBackEqFocal = prelimSorted.firstOrNull {
+        // Identify true primary 1x main rear camera BEFORE sorting (never let 0.6x ultrawide sort first!)
+        val backPrimaryPool = lenses.filter {
             it.lensFacing == CameraCharacteristics.LENS_FACING_BACK && it.physicalId == null
-        }?.equivalentFocalLengthMm
-            ?: prelimSorted.firstOrNull { it.lensFacing == CameraCharacteristics.LENS_FACING_BACK }?.equivalentFocalLengthMm
-            ?: 24
+        }
+        val primaryMainBack = backPrimaryPool.firstOrNull { it.cameraId == "0" }
+            ?: backPrimaryPool
+                .filter { it.equivalentFocalLengthMm in 21..32 }
+                .maxByOrNull { it.maxPhotoWidth.toLong() * it.maxPhotoHeight.toLong() }
+            ?: backPrimaryPool.maxByOrNull { it.maxPhotoWidth.toLong() * it.maxPhotoHeight.toLong() }
+            ?: lenses.firstOrNull { it.lensFacing == CameraCharacteristics.LENS_FACING_BACK }
 
-        val sortedLenses = prelimSorted.map { info ->
+        val mainBackEqFocal = primaryMainBack?.equivalentFocalLengthMm ?: 24
+
+        val normalizedLenses = lenses.map { info ->
             if (info.lensFacing != CameraCharacteristics.LENS_FACING_BACK) {
                 info.copy(opticalZoomRatio = 1.0f)
             } else {
+                val isPrimary = primaryMainBack != null &&
+                    info.cameraId == primaryMainBack.cameraId &&
+                    info.physicalId == primaryMainBack.physicalId
                 val rawRatio = info.equivalentFocalLengthMm.toFloat() / mainBackEqFocal.coerceAtLeast(1).toFloat()
                 val normalized = when {
+                    isPrimary -> 1.0f
                     rawRatio in 0.85f..1.18f -> 1.0f
+                    rawRatio < 0.54f -> 0.5f
+                    rawRatio < 0.72f -> 0.6f
                     rawRatio < 0.85f -> (Math.round(rawRatio * 10f) / 10f).coerceIn(0.4f, 0.8f)
                     else -> (Math.round(rawRatio * 10f) / 10f).coerceIn(1.2f, 20f)
                 }
                 val upgradedLabel = when {
-                    info.physicalId == null && normalized == 1.0f -> "1x"
+                    isPrimary || (info.physicalId == null && normalized == 1.0f) -> "1x"
                     normalized < 0.85f -> "${normalized}x"
                     normalized >= 1.8f && normalized == normalized.toInt().toFloat() -> "${normalized.toInt()}x"
                     normalized >= 1.5f -> "${normalized}x"
@@ -108,6 +129,22 @@ class HardwareCapabilityDetector(private val context: Context) {
                 )
             }
         }
+
+        // Sort cleanly: Primary 1x Rear first, then other rear lenses by zoom ratio, then Front
+        val sortedLenses = normalizedLenses.sortedWith(
+            compareBy<CameraLensInfo> {
+                when (it.lensFacing) {
+                    CameraCharacteristics.LENS_FACING_BACK -> 0
+                    CameraCharacteristics.LENS_FACING_FRONT -> 1
+                    else -> 2
+                }
+            }.thenByDescending {
+                primaryMainBack != null &&
+                    it.cameraId == primaryMainBack.cameraId &&
+                    it.physicalId == primaryMainBack.physicalId
+            }.thenBy { it.physicalId != null }
+                .thenBy { it.opticalZoomRatio }
+        )
 
         DeviceCapabilityReport(
             deviceModel = Build.MODEL,
@@ -202,7 +239,7 @@ class HardwareCapabilityDetector(private val context: Context) {
         }
 
         val fpsRanges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: emptyArray()
-        val videoProfiles = detectVideoProfiles(map, fpsRanges)
+        val videoProfiles = detectVideoProfiles(logicalId, hwLevel, map, fpsRanges)
         val slowMoOptions = detectSlowMoOptions(map)
 
         val displayLabel = when {
@@ -293,22 +330,26 @@ class HardwareCapabilityDetector(private val context: Context) {
             val stops = mutableListOf<com.example.model.ZoomStopPreset>()
 
             // 1. Ultrawide (< 0.85x): prefer CONTROL_ZOOM_RATIO on logical camera if supported, else dedicated physical UW lens
-            val uwPhysical = backLenses.firstOrNull { it.opticalZoomRatio < 0.85f }
-            if (mainLens.minZoom <= 0.72f) {
-                val z = (Math.round(mainLens.minZoom.coerceAtLeast(0.5f) * 10f) / 10f)
+            val uwPhysical = backLenses
+                .filter { it.opticalZoomRatio < 0.85f && it.maxPhotoWidth >= 1920 }
+                .minByOrNull { it.opticalZoomRatio }
+            if (mainLens.minZoom <= 0.78f) {
+                val rawMin = mainLens.minZoom.coerceIn(0.5f, 0.75f)
+                val rounded = (Math.round(rawMin * 10f) / 10f).coerceIn(0.5f, 0.7f)
                 stops.add(
                     com.example.model.ZoomStopPreset(
-                        label = "${z}x",
-                        targetZoomRatio = z,
-                        equivalentFocalMm = (mainEq * z).toInt(),
+                        label = "${rounded}x",
+                        targetZoomRatio = rounded,
+                        equivalentFocalMm = (mainEq * rounded).toInt().coerceAtLeast(10),
                         isOpticalLens = true,
                         backingLens = mainLens
                     )
                 )
             } else if (uwPhysical != null) {
+                val uwRatio = uwPhysical.opticalZoomRatio.coerceIn(0.5f, 0.8f)
                 stops.add(
                     com.example.model.ZoomStopPreset(
-                        label = "${uwPhysical.opticalZoomRatio}x",
+                        label = "${uwRatio}x",
                         targetZoomRatio = 1.0f,
                         equivalentFocalMm = uwPhysical.equivalentFocalLengthMm,
                         isOpticalLens = true,
@@ -387,19 +428,22 @@ class HardwareCapabilityDetector(private val context: Context) {
     }
 
     private fun detectVideoProfiles(
+        cameraId: String,
+        hardwareLevel: Int,
         map: StreamConfigurationMap?,
         fpsRanges: Array<Range<Int>>
     ): List<VideoProfileOption> {
         if (map == null) {
-            return listOf(VideoProfileOption(VideoResolutionPreset.RES_1080P, listOf(30)))
+            return listOf(
+                VideoProfileOption(VideoResolutionPreset.RES_720P, listOf(30, 60)),
+                VideoProfileOption(VideoResolutionPreset.RES_1080P, listOf(30, 60))
+            )
         }
         val sizes = map.getOutputSizes(MediaRecorder::class.java)?.toList().orEmpty()
+        val hsSizes = runCatching { map.highSpeedVideoSizes?.toList() }.getOrNull().orEmpty()
+        val camIdInt = cameraId.toIntOrNull()
         val maxAeFps = fpsRanges.maxOfOrNull { it.upper } ?: 30
-        val candidateFps = buildList {
-            if (fpsRanges.any { it.upper >= 24 && it.lower <= 24 }) add(24)
-            add(30)
-            if (maxAeFps >= 60) add(60)
-        }.distinct()
+        val supports24 = fpsRanges.any { it.upper >= 24 && it.lower <= 24 }
 
         val result = mutableListOf<VideoProfileOption>()
         for (preset in VideoResolutionPreset.entries) {
@@ -412,19 +456,93 @@ class HardwareCapabilityDetector(private val context: Context) {
                 val minFrameDurationNs = runCatching {
                     map.getOutputMinFrameDuration(MediaRecorder::class.java, matchedSize)
                 }.getOrDefault(0L)
-                val maxSizeFps = if (minFrameDurationNs > 0L) {
-                    (1_000_000_000L / minFrameDurationNs).toInt()
-                } else {
-                    maxAeFps
+                val durationSupports60 = minFrameDurationNs in 1L..17_500_000L
+
+                val hsSupports60 = hsSizes.any { hs ->
+                    hs.width >= preset.width && hs.height >= preset.height &&
+                        (runCatching {
+                            map.getHighSpeedVideoFpsRangesFor(hs)?.any { it.upper >= 60 } == true
+                        }.getOrDefault(false))
                 }
-                val supportedForSize = candidateFps.filter { it <= maxSizeFps }.ifEmpty { listOf(30) }
+
+                val camcorderSupports60 = camIdInt != null && camcorderSupports60Fps(camIdInt, cameraId, preset)
+                val encoderSupports60 = (preset == VideoResolutionPreset.RES_720P || preset == VideoResolutionPreset.RES_1080P) &&
+                    hardwareLevel != CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY &&
+                    hwEncoderSupportsSizeAndFps(preset.width, preset.height, 60.0)
+
+                val supports60 = when (preset) {
+                    VideoResolutionPreset.RES_720P, VideoResolutionPreset.RES_1080P -> {
+                        maxAeFps >= 60 || durationSupports60 || hsSupports60 || camcorderSupports60 || encoderSupports60
+                    }
+                    VideoResolutionPreset.RES_4K -> {
+                        (maxAeFps >= 60 && durationSupports60) || hsSupports60 || camcorderSupports60
+                    }
+                }
+
+                val supportedForSize = buildList {
+                    if (supports24) add(24)
+                    add(30)
+                    if (supports60) add(60)
+                }.distinct()
                 result.add(VideoProfileOption(preset, supportedForSize))
             }
         }
         if (result.isEmpty()) {
-            result.add(VideoProfileOption(VideoResolutionPreset.RES_1080P, listOf(30)))
+            result.add(VideoProfileOption(VideoResolutionPreset.RES_720P, listOf(30, 60)))
+            result.add(VideoProfileOption(VideoResolutionPreset.RES_1080P, listOf(30, 60)))
         }
         return result
+    }
+
+    @Suppress("DEPRECATION")
+    private fun camcorderSupports60Fps(camIdInt: Int, camIdStr: String, preset: VideoResolutionPreset): Boolean {
+        return runCatching {
+            val hsQuality = when (preset) {
+                VideoResolutionPreset.RES_720P -> CamcorderProfile.QUALITY_HIGH_SPEED_720P
+                VideoResolutionPreset.RES_1080P -> CamcorderProfile.QUALITY_HIGH_SPEED_1080P
+                VideoResolutionPreset.RES_4K -> CamcorderProfile.QUALITY_HIGH_SPEED_2160P
+            }
+            val stdQuality = when (preset) {
+                VideoResolutionPreset.RES_720P -> CamcorderProfile.QUALITY_720P
+                VideoResolutionPreset.RES_1080P -> CamcorderProfile.QUALITY_1080P
+                VideoResolutionPreset.RES_4K -> CamcorderProfile.QUALITY_2160P
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val hsAll = CamcorderProfile.getAll(camIdStr, hsQuality)?.videoProfiles.orEmpty()
+                if (hsAll.any { it.frameRate >= 60 }) return@runCatching true
+                val stdAll = CamcorderProfile.getAll(camIdStr, stdQuality)?.videoProfiles.orEmpty()
+                if (stdAll.any { it.frameRate >= 60 }) return@runCatching true
+            }
+            if (CamcorderProfile.hasProfile(camIdInt, hsQuality)) {
+                val p = CamcorderProfile.get(camIdInt, hsQuality)
+                if (p.videoFrameRate >= 60) return@runCatching true
+            }
+            if (CamcorderProfile.hasProfile(camIdInt, stdQuality)) {
+                val p = CamcorderProfile.get(camIdInt, stdQuality)
+                if (p.videoFrameRate >= 60) return@runCatching true
+            }
+            false
+        }.getOrDefault(false)
+    }
+
+    private fun hwEncoderSupportsSizeAndFps(width: Int, height: Int, fps: Double): Boolean {
+        return runCatching {
+            val list = MediaCodecList(MediaCodecList.REGULAR_CODECS)
+            list.codecInfos.any { info ->
+                if (!info.isEncoder) return@any false
+                val isHw = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    info.isHardwareAccelerated
+                } else {
+                    !info.name.startsWith("OMX.google.", ignoreCase = true)
+                }
+                if (!isHw) return@any false
+                info.supportedTypes.any { type ->
+                    if (type != "video/avc" && type != "video/hevc") return@any false
+                    val caps = runCatching { info.getCapabilitiesForType(type)?.videoCapabilities }.getOrNull()
+                    caps?.areSizeAndRateSupported(width, height, fps) == true
+                }
+            }
+        }.getOrDefault(false)
     }
 
     private fun detectSlowMoOptions(map: StreamConfigurationMap?): List<SlowMoOption> {

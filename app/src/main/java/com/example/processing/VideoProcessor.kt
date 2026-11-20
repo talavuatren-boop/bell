@@ -74,15 +74,65 @@ class VideoProcessor(private val context: Context) {
         val trimEnd = if (config.trimEndMs in (trimStart + 200L)..durationMs) config.trimEndMs else durationMs
         val effectiveDurMs = (trimEnd - trimStart).coerceAtLeast(300L)
 
-        // Preserve orientation aspect
+        // Preserve orientation aspect (or exact coded aspect when preserveSourceAspect = true)
         val portrait = displayH > displayW
-        val rawW = config.targetResolution.width
-        val rawH = config.targetResolution.height
-        val targetW = ((if (portrait) min(rawW, rawH) else max(rawW, rawH)) / 16) * 16
-        val targetH = ((if (portrait) max(rawW, rawH) else min(rawW, rawH)) / 16) * 16
+        val targetW: Int
+        val targetH: Int
+        if (config.preserveSourceAspect && displayW > 0 && displayH > 0) {
+            val maxDim = max(config.targetResolution.width, config.targetResolution.height)
+            val scale = min(1f, maxDim.toFloat() / max(displayW, displayH).toFloat())
+            targetW = (((displayW * scale).roundToInt()) / 16).coerceAtLeast(16) * 16
+            targetH = (((displayH * scale).roundToInt()) / 16).coerceAtLeast(16) * 16
+        } else {
+            val rawW = config.targetResolution.width
+            val rawH = config.targetResolution.height
+            targetW = ((if (portrait) min(rawW, rawH) else max(rawW, rawH)) / 16) * 16
+            targetH = ((if (portrait) max(rawW, rawH) else min(rawW, rawH)) / 16) * 16
+        }
 
         val baseFps = config.targetFps.coerceIn(24, 60)
         val outFps = if (interpolateTo60Fps && baseFps < 60) 60 else baseFps
+        val bitrate = when (mode) {
+            AiProcessingMode.FAST -> 10_000_000
+            AiProcessingMode.BALANCED -> 18_000_000
+            AiProcessingMode.QUALITY -> 28_000_000
+        }
+        val colorMatrix = buildColorMatrix(config)
+
+        // Fast hardware GPU transcode path when no spatial/temporal bitmap kernels are required
+        val needsBitmapKernels = config.applyStabilization ||
+            config.applyDenoise ||
+            config.applySharpen ||
+            interpolateTo60Fps ||
+            applyFrameEnhance
+        if (!needsBitmapKernels) {
+            val fastResult = runCatching {
+                tryFastGpuTranscode(
+                    sourceUri = sourceUri,
+                    outFile = outFile,
+                    srcRot = srcRot,
+                    srcW = srcW,
+                    srcH = srcH,
+                    trimStartMs = trimStart,
+                    trimEndMs = trimEnd,
+                    effectiveDurMs = effectiveDurMs,
+                    muteAudio = config.muteAudio,
+                    preserveSourceAspect = config.preserveSourceAspect,
+                    targetPreset = config.targetResolution,
+                    outFps = baseFps,
+                    bitrate = bitrate,
+                    colorMatrix = colorMatrix,
+                    startMs = startMs,
+                    onProgress = onProgress
+                )
+            }.getOrNull()
+            if (fastResult != null) {
+                runCatching { retriever.release() }
+                return@withContext fastResult
+            } else {
+                runCatching { outFile.delete() }
+            }
+        }
 
         // Cap sample step gracefully for thermal/RAM efficiency while maintaining smooth output
         val sampleFps = when (mode) {
@@ -93,12 +143,6 @@ class VideoProcessor(private val context: Context) {
 
         val totalSourceFrames = ((effectiveDurMs / 1000.0) * sampleFps).roundToInt().coerceIn(4, 1800)
         val frameStepUs = (effectiveDurMs * 1000L) / totalSourceFrames.coerceAtLeast(1)
-
-        val bitrate = when (mode) {
-            AiProcessingMode.FAST -> 10_000_000
-            AiProcessingMode.BALANCED -> 18_000_000
-            AiProcessingMode.QUALITY -> 28_000_000
-        }
 
         val gyroSamples = loadGyroSamples(gyroTrackPath)
 
@@ -111,12 +155,14 @@ class VideoProcessor(private val context: Context) {
         val encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
         encoder.configure(vFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         val inputSurface = encoder.createInputSurface()
+        val eglSurface = EglVideoColorSurface.create(inputSurface, targetW, targetH)
         encoder.start()
 
         val muxer = MediaMuxer(outFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
         var videoTrackIdx = -1
         var audioTrackIdx = -1
         var muxerStarted = false
+        val ptsState = PtsTrackState()
 
         // Inspect source audio track if not muted
         val audioExtractor = if (!config.muteAudio) prepareAudioExtractor(sourceUri) else null
@@ -136,7 +182,6 @@ class VideoProcessor(private val context: Context) {
 
         val bufferInfo = MediaCodec.BufferInfo()
         val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-        val colorMatrix = buildColorMatrix(config)
         if (colorMatrix != null) {
             paint.colorFilter = ColorMatrixColorFilter(colorMatrix)
         }
@@ -148,7 +193,7 @@ class VideoProcessor(private val context: Context) {
         var prevFrameBitmap: Bitmap? = null
 
         var outFrameIndex = 0L
-        val outFrameDurationUs = 1_000_000L / outFps
+        val outFrameDurationNs = 1_000_000_000L / outFps.coerceAtLeast(1)
 
         try {
             onProgress(5, "Initializing segmented MediaCodec pipeline...")
@@ -195,8 +240,20 @@ class VideoProcessor(private val context: Context) {
                 // Motion-compensated frame interpolation (generates warped intermediate frame before current frame)
                 if (interpolateTo60Fps && prevFrameBitmap != null) {
                     val interp = buildMotionInterpolatedFrame(prevFrameBitmap!!, processedFrame)
-                    drawFrameToSurface(inputSurface, interp, targetW, targetH, paint, 0f, 0f, 1f)
-                    drainEncoder(encoder, muxer, bufferInfo, audioFormat, { vt, at, started ->
+                    drawFrameToSurface(
+                        surface = inputSurface,
+                        eglSurface = eglSurface,
+                        frame = interp,
+                        targetW = targetW,
+                        targetH = targetH,
+                        paint = paint,
+                        colorMatrix = colorMatrix,
+                        shiftX = 0f,
+                        shiftY = 0f,
+                        cropScale = 1f,
+                        ptsNs = outFrameIndex * outFrameDurationNs
+                    )
+                    drainEncoder(encoder, muxer, bufferInfo, ptsState, audioFormat, { vt, at, started ->
                         videoTrackIdx = vt; audioTrackIdx = at; muxerStarted = started
                     }, { videoTrackIdx to muxerStarted })
                     outFrameIndex++
@@ -222,16 +279,19 @@ class VideoProcessor(private val context: Context) {
 
                 drawFrameToSurface(
                     surface = inputSurface,
+                    eglSurface = eglSurface,
                     frame = processedFrame,
                     targetW = targetW,
                     targetH = targetH,
                     paint = paint,
+                    colorMatrix = colorMatrix,
                     shiftX = shiftX,
                     shiftY = shiftY,
-                    cropScale = cropScale
+                    cropScale = cropScale,
+                    ptsNs = outFrameIndex * outFrameDurationNs
                 )
 
-                drainEncoder(encoder, muxer, bufferInfo, audioFormat, { vt, at, started ->
+                drainEncoder(encoder, muxer, bufferInfo, ptsState, audioFormat, { vt, at, started ->
                     videoTrackIdx = vt; audioTrackIdx = at; muxerStarted = started
                 }, { videoTrackIdx to muxerStarted })
 
@@ -241,29 +301,12 @@ class VideoProcessor(private val context: Context) {
             }
 
             encoder.signalEndOfInputStream()
-            drainEncoderEnd(encoder, muxer, bufferInfo, { videoTrackIdx to muxerStarted })
+            drainEncoderEnd(encoder, muxer, bufferInfo, ptsState, { videoTrackIdx to muxerStarted })
 
-            // Mux preserved audio track within trim window
+            // Mux preserved audio track within trim window with monotonic zero-based timestamps
             if (muxerStarted && audioTrackIdx >= 0 && audioExtractor != null && audioSrcTrack >= 0) {
                 onProgress(90, "Synchronizing original audio track...")
-                audioExtractor.seekTo(trimStart * 1000L, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
-                val aBuf = ByteBuffer.allocate(256 * 1024)
-                val aInfo = MediaCodec.BufferInfo()
-                while (true) {
-                    coroutineContext.ensureActive()
-                    val sampleSize = audioExtractor.readSampleData(aBuf, 0)
-                    if (sampleSize < 0) break
-                    val sampleTime = audioExtractor.sampleTime
-                    if (sampleTime > trimEnd * 1000L) break
-                    if (sampleTime >= trimStart * 1000L) {
-                        aInfo.offset = 0
-                        aInfo.size = sampleSize
-                        aInfo.presentationTimeUs = (sampleTime - trimStart * 1000L).coerceAtLeast(0L)
-                        aInfo.flags = audioExtractor.sampleFlags
-                        muxer.writeSampleData(audioTrackIdx, aBuf, aInfo)
-                    }
-                    audioExtractor.advance()
-                }
+                muxAudioRange(audioExtractor, muxer, audioTrackIdx, trimStart * 1000L, trimEnd * 1000L, ptsState.lastWrittenPtsUs.coerceAtLeast(300_000L))
             }
 
             onProgress(100, "Export complete")
@@ -273,6 +316,7 @@ class VideoProcessor(private val context: Context) {
             runCatching { audioExtractor?.release() }
             runCatching { encoder.stop() }
             runCatching { encoder.release() }
+            runCatching { eglSurface?.release() }
             runCatching { inputSurface.release() }
             if (muxerStarted) {
                 runCatching { muxer.stop() }
@@ -290,17 +334,286 @@ class VideoProcessor(private val context: Context) {
         )
     }
 
+    private class PtsTrackState {
+        var firstRawPtsUs: Long = -1L
+        var lastWrittenPtsUs: Long = -1L
+    }
+
+    private suspend fun tryFastGpuTranscode(
+        sourceUri: Uri,
+        outFile: File,
+        srcRot: Int,
+        srcW: Int,
+        srcH: Int,
+        trimStartMs: Long,
+        trimEndMs: Long,
+        effectiveDurMs: Long,
+        muteAudio: Boolean,
+        preserveSourceAspect: Boolean,
+        targetPreset: VideoResolutionPreset,
+        outFps: Int,
+        bitrate: Int,
+        colorMatrix: ColorMatrix?,
+        startMs: Long,
+        onProgress: (percent: Int, stage: String) -> Unit
+    ): VideoProcessResult? {
+        val extractor = MediaExtractor().apply { setDataSource(context, sourceUri, null) }
+        var videoTrack = -1
+        var audioTrack = -1
+        var inputVideoFormat: MediaFormat? = null
+        var audioFormat: MediaFormat? = null
+        for (i in 0 until extractor.trackCount) {
+            val fmt = extractor.getTrackFormat(i)
+            val mime = fmt.getString(MediaFormat.KEY_MIME).orEmpty()
+            if (mime.startsWith("video/") && videoTrack < 0) {
+                videoTrack = i
+                inputVideoFormat = fmt
+            } else if (mime.startsWith("audio/") && audioTrack < 0 && !muteAudio) {
+                audioTrack = i
+                audioFormat = fmt
+            }
+        }
+        val inFmt = inputVideoFormat ?: run {
+            extractor.release()
+            return null
+        }
+        val videoMime = inFmt.getString(MediaFormat.KEY_MIME) ?: run {
+            extractor.release()
+            return null
+        }
+
+        val rawCodedW = inFmt.getInteger(MediaFormat.KEY_WIDTH).takeIf { it > 0 } ?: srcW
+        val rawCodedH = inFmt.getInteger(MediaFormat.KEY_HEIGHT).takeIf { it > 0 } ?: srcH
+        val maxTargetDim = max(targetPreset.width, targetPreset.height)
+        val scale = if (preserveSourceAspect || max(rawCodedW, rawCodedH) > maxTargetDim) {
+            min(1f, maxTargetDim.toFloat() / max(rawCodedW, rawCodedH).toFloat())
+        } else 1f
+        val encW = (((rawCodedW * scale).roundToInt()) / 16).coerceAtLeast(16) * 16
+        val encH = (((rawCodedH * scale).roundToInt()) / 16).coerceAtLeast(16) * 16
+
+        val encFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, encW, encH).apply {
+            setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+            setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
+            setInteger(MediaFormat.KEY_FRAME_RATE, outFps)
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+        }
+        val encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+        encoder.configure(encFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+        val encInputSurface = encoder.createInputSurface()
+        val egl = EglVideoColorSurface.create(encInputSurface, encW, encH)
+        if (egl == null) {
+            runCatching { encoder.release() }
+            runCatching { encInputSurface.release() }
+            runCatching { extractor.release() }
+            return null
+        }
+        encoder.start()
+
+        val oesTexId = egl.createOesInputTexture()
+        val surfaceTexture = android.graphics.SurfaceTexture(oesTexId)
+        val frameSync = Object()
+        var frameReady = false
+        surfaceTexture.setOnFrameAvailableListener {
+            synchronized(frameSync) {
+                frameReady = true
+                frameSync.notifyAll()
+            }
+        }
+        val decOutputSurface = android.view.Surface(surfaceTexture)
+        val decoder = MediaCodec.createDecoderByType(videoMime)
+        // Strip KEY_ROTATION before passing to decoder when we preserve coded stream + muxer.setOrientationHint
+        val decFmt = MediaFormat.createVideoFormat(videoMime, rawCodedW, rawCodedH).apply {
+            for (k in listOf("csd-0", "csd-1", "csd-2")) {
+                if (inFmt.containsKey(k)) inFmt.getByteBuffer(k)?.let { setByteBuffer(k, it) }
+            }
+        }
+        decoder.configure(decFmt, decOutputSurface, null, 0)
+        decoder.start()
+
+        val muxer = MediaMuxer(outFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+        muxer.setOrientationHint(((srcRot % 360) + 360) % 360)
+        var muxVideoTrack = -1
+        var muxAudioTrack = -1
+        var muxerStarted = false
+        val ptsState = PtsTrackState()
+
+        val stMatrix = FloatArray(16)
+        val decInfo = MediaCodec.BufferInfo()
+        val encInfo = MediaCodec.BufferInfo()
+        val trimStartUs = trimStartMs * 1000L
+        val trimEndUs = trimEndMs * 1000L
+        val effectiveDurUs = (effectiveDurMs * 1000L).coerceAtLeast(300_000L)
+
+        try {
+            extractor.selectTrack(videoTrack)
+            if (trimStartUs > 0L) {
+                extractor.seekTo(trimStartUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+            }
+
+            onProgress(8, "GPU ColorMatrix transcode active...")
+            var inputDone = false
+            var outputDone = false
+            var firstDecodedPtsUs = -1L
+            var lastRenderedPtsNs = -1L
+
+            while (!outputDone) {
+                coroutineContext.ensureActive()
+
+                if (!inputDone) {
+                    val inIdx = decoder.dequeueInputBuffer(5_000L)
+                    if (inIdx >= 0) {
+                        val inBuf = decoder.getInputBuffer(inIdx)
+                        if (inBuf != null) {
+                            val size = extractor.readSampleData(inBuf, 0)
+                            val sampleTime = extractor.sampleTime
+                            if (size < 0 || (trimEndUs > trimStartUs && sampleTime > trimEndUs + 200_000L)) {
+                                decoder.queueInputBuffer(inIdx, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                                inputDone = true
+                            } else {
+                                decoder.queueInputBuffer(inIdx, 0, size, sampleTime.coerceAtLeast(0L), extractor.sampleFlags)
+                                extractor.advance()
+                            }
+                        }
+                    }
+                }
+
+                val outIdx = decoder.dequeueOutputBuffer(decInfo, 5_000L)
+                when {
+                    outIdx >= 0 -> {
+                        val eos = (decInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
+                        val inWindow = decInfo.size > 0 && decInfo.presentationTimeUs >= trimStartUs - 35_000L &&
+                            (trimEndUs <= trimStartUs || decInfo.presentationTimeUs <= trimEndUs + 50_000L)
+                        if (inWindow) {
+                            synchronized(frameSync) { frameReady = false }
+                            decoder.releaseOutputBuffer(outIdx, true)
+                            var waited = false
+                            synchronized(frameSync) {
+                                if (!frameReady) {
+                                    frameSync.wait(250L)
+                                }
+                                waited = frameReady
+                            }
+                            if (waited) {
+                                surfaceTexture.updateTexImage()
+                                surfaceTexture.getTransformMatrix(stMatrix)
+                                if (firstDecodedPtsUs < 0L) firstDecodedPtsUs = decInfo.presentationTimeUs
+                                val relPtsUs = (decInfo.presentationTimeUs - firstDecodedPtsUs).coerceAtLeast(0L)
+                                val ptsNs = max(relPtsUs * 1000L, lastRenderedPtsNs + 1_000_000L)
+                                lastRenderedPtsNs = ptsNs
+                                egl.drawOesFrame(oesTexId, stMatrix, colorMatrix, ptsNs)
+                                drainEncoder(encoder, muxer, encInfo, ptsState, audioFormat, { vt, at, started ->
+                                    muxVideoTrack = vt; muxAudioTrack = at; muxerStarted = started
+                                }, { muxVideoTrack to muxerStarted })
+                                val pct = 10 + ((relPtsUs * 75) / effectiveDurUs).toInt().coerceIn(0, 78)
+                                onProgress(pct, "Applying filter ($pct%)...")
+                            }
+                        } else {
+                            decoder.releaseOutputBuffer(outIdx, false)
+                        }
+                        if (eos) {
+                            outputDone = true
+                        }
+                    }
+                }
+            }
+
+            encoder.signalEndOfInputStream()
+            drainEncoderEnd(encoder, muxer, encInfo, ptsState, { muxVideoTrack to muxerStarted })
+
+            if (muxerStarted && muxAudioTrack >= 0 && audioTrack >= 0) {
+                onProgress(90, "Synchronizing audio track...")
+                extractor.unselectTrack(videoTrack)
+                extractor.selectTrack(audioTrack)
+                muxAudioRange(extractor, muxer, muxAudioTrack, trimStartUs, trimEndUs, ptsState.lastWrittenPtsUs.coerceAtLeast(300_000L))
+            }
+            onProgress(100, "Export complete")
+        } finally {
+            runCatching { decoder.stop() }
+            runCatching { decoder.release() }
+            runCatching { decOutputSurface.release() }
+            runCatching { surfaceTexture.release() }
+            runCatching { extractor.release() }
+            runCatching { encoder.stop() }
+            runCatching { encoder.release() }
+            runCatching { egl.release() }
+            runCatching { encInputSurface.release() }
+            if (muxerStarted) runCatching { muxer.stop() }
+            runCatching { muxer.release() }
+        }
+
+        val displayOutW = if (srcRot == 90 || srcRot == 270) encH else encW
+        val displayOutH = if (srcRot == 90 || srcRot == 270) encW else encH
+        return VideoProcessResult(
+            outputFile = outFile,
+            width = displayOutW,
+            height = displayOutH,
+            fps = outFps,
+            bitrateBps = bitrate,
+            processingTimeMs = System.currentTimeMillis() - startMs
+        )
+    }
+
+    private suspend fun muxAudioRange(
+        extractor: MediaExtractor,
+        muxer: MediaMuxer,
+        audioTrackIdx: Int,
+        trimStartUs: Long,
+        trimEndUs: Long,
+        maxVideoPtsUs: Long
+    ) {
+        extractor.seekTo(trimStartUs, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+        val aBuf = ByteBuffer.allocate(256 * 1024)
+        val aInfo = MediaCodec.BufferInfo()
+        var firstAudioPts = -1L
+        var lastWrittenAudio = -1L
+        val maxAudioUs = maxVideoPtsUs + 150_000L
+        while (true) {
+            coroutineContext.ensureActive()
+            val sampleSize = extractor.readSampleData(aBuf, 0)
+            if (sampleSize < 0) break
+            val sampleTime = extractor.sampleTime
+            if (trimEndUs > trimStartUs && sampleTime > trimEndUs) break
+            if (sampleTime >= trimStartUs) {
+                if (firstAudioPts < 0L) firstAudioPts = sampleTime
+                val relUs = (sampleTime - firstAudioPts).coerceAtLeast(lastWrittenAudio + 1L)
+                if (relUs > maxAudioUs && lastWrittenAudio >= 0L) break
+                lastWrittenAudio = relUs
+                aInfo.offset = 0
+                aInfo.size = sampleSize
+                aInfo.presentationTimeUs = relUs
+                aInfo.flags = extractor.sampleFlags
+                runCatching { muxer.writeSampleData(audioTrackIdx, aBuf, aInfo) }
+            }
+            extractor.advance()
+        }
+    }
+
     private fun drawFrameToSurface(
         surface: android.view.Surface,
+        eglSurface: EglVideoColorSurface?,
         frame: Bitmap,
         targetW: Int,
         targetH: Int,
         paint: Paint,
+        colorMatrix: ColorMatrix?,
         shiftX: Float,
         shiftY: Float,
-        cropScale: Float
+        cropScale: Float,
+        ptsNs: Long
     ) {
-        val canvas: Canvas = surface.lockHardwareCanvas()
+        if (eglSurface != null) {
+            eglSurface.drawBitmapFrame(
+                bitmap = frame,
+                colorMatrix = colorMatrix,
+                shiftX = shiftX,
+                shiftY = shiftY,
+                cropScale = cropScale,
+                ptsNs = ptsNs
+            )
+            return
+        }
+        // Fallback when EGL14 is unavailable (e.g. headless Robolectric JVM)
+        val canvas: Canvas = surface.lockCanvas(null)
         try {
             canvas.drawColor(android.graphics.Color.BLACK)
             val m = Matrix().apply {
@@ -317,6 +630,7 @@ class VideoProcessor(private val context: Context) {
         encoder: MediaCodec,
         muxer: MediaMuxer,
         info: MediaCodec.BufferInfo,
+        ptsState: PtsTrackState,
         audioFormat: MediaFormat?,
         onMuxerConfigured: (videoTrack: Int, audioTrack: Int, started: Boolean) -> Unit,
         trackState: () -> Pair<Int, Boolean>
@@ -328,7 +642,7 @@ class VideoProcessor(private val context: Context) {
                 val (_, alreadyStarted) = trackState()
                 if (!alreadyStarted) {
                     val vt = muxer.addTrack(encoder.outputFormat)
-                    val at = if (audioFormat != null) muxer.addTrack(audioFormat) else -1
+                    val at = if (audioFormat != null) runCatching { muxer.addTrack(audioFormat) }.getOrDefault(-1) else -1
                     muxer.start()
                     onMuxerConfigured(vt, at, true)
                 }
@@ -336,9 +650,15 @@ class VideoProcessor(private val context: Context) {
                 val buf = encoder.getOutputBuffer(outIdx)
                 val (vt, started) = trackState()
                 if (buf != null && started && vt >= 0 && info.size > 0 && (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
+                    if (ptsState.firstRawPtsUs < 0L) ptsState.firstRawPtsUs = info.presentationTimeUs
+                    val normPts = (info.presentationTimeUs - ptsState.firstRawPtsUs).coerceAtLeast(ptsState.lastWrittenPtsUs + 1L)
+                    ptsState.lastWrittenPtsUs = normPts
+                    val normInfo = MediaCodec.BufferInfo().apply {
+                        set(info.offset, info.size, normPts, info.flags)
+                    }
                     buf.position(info.offset)
                     buf.limit(info.offset + info.size)
-                    muxer.writeSampleData(vt, buf, info)
+                    muxer.writeSampleData(vt, buf, normInfo)
                 }
                 encoder.releaseOutputBuffer(outIdx, false)
             }
@@ -349,6 +669,7 @@ class VideoProcessor(private val context: Context) {
         encoder: MediaCodec,
         muxer: MediaMuxer,
         info: MediaCodec.BufferInfo,
+        ptsState: PtsTrackState,
         trackState: () -> Pair<Int, Boolean>
     ) {
         var attempts = 0
@@ -358,9 +679,15 @@ class VideoProcessor(private val context: Context) {
                 val buf = encoder.getOutputBuffer(outIdx)
                 val (vt, started) = trackState()
                 if (buf != null && started && vt >= 0 && info.size > 0 && (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
+                    if (ptsState.firstRawPtsUs < 0L) ptsState.firstRawPtsUs = info.presentationTimeUs
+                    val normPts = (info.presentationTimeUs - ptsState.firstRawPtsUs).coerceAtLeast(ptsState.lastWrittenPtsUs + 1L)
+                    ptsState.lastWrittenPtsUs = normPts
+                    val normInfo = MediaCodec.BufferInfo().apply {
+                        set(info.offset, info.size, normPts, info.flags)
+                    }
                     buf.position(info.offset)
                     buf.limit(info.offset + info.size)
-                    muxer.writeSampleData(vt, buf, info)
+                    muxer.writeSampleData(vt, buf, normInfo)
                 }
                 encoder.releaseOutputBuffer(outIdx, false)
                 if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) break
@@ -632,12 +959,14 @@ class VideoProcessor(private val context: Context) {
         val encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
         encoder.configure(vFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         val inputSurface = encoder.createInputSurface()
+        val eglSurface = EglVideoColorSurface.create(inputSurface, outW, outH)
         encoder.start()
 
         val muxer = MediaMuxer(outFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
         var videoTrackIdx = -1
         var audioTrackIdx = -1
         var muxerStarted = false
+        val ptsState = PtsTrackState()
 
         val primaryAudioExtractor = if (includeAudio) prepareAudioExtractor(sourceUris.first()) else null
         var audioSrcTrack = -1
@@ -656,6 +985,8 @@ class VideoProcessor(private val context: Context) {
 
         val bufferInfo = MediaCodec.BufferInfo()
         val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        var outFrameIndex = 0L
+        val outFrameDurationNs = 1_000_000_000L / fps.coerceAtLeast(1)
 
         try {
             onProgress(4, "Inspecting ${sourceUris.size} video streams...")
@@ -682,16 +1013,29 @@ class VideoProcessor(private val context: Context) {
                             coroutineContext.ensureActive()
                             val raw = retriever.getFrameAtTime(i * stepUs, MediaMetadataRetriever.OPTION_CLOSEST)
                                 ?: continue
-                            val canvas = inputSurface.lockHardwareCanvas()
-                            try {
-                                canvas.drawColor(android.graphics.Color.BLACK)
-                                drawAspectFit(canvas, raw, 0f, 0f, outW.toFloat(), outH.toFloat(), paint)
-                            } finally {
-                                inputSurface.unlockCanvasAndPost(canvas)
+                            val fitted = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
+                            Canvas(fitted).apply {
+                                drawColor(android.graphics.Color.BLACK)
+                                drawAspectFit(this, raw, 0f, 0f, outW.toFloat(), outH.toFloat(), paint)
                             }
                             raw.recycle()
+                            drawFrameToSurface(
+                                surface = inputSurface,
+                                eglSurface = eglSurface,
+                                frame = fitted,
+                                targetW = outW,
+                                targetH = outH,
+                                paint = paint,
+                                colorMatrix = null,
+                                shiftX = 0f,
+                                shiftY = 0f,
+                                cropScale = 1f,
+                                ptsNs = outFrameIndex * outFrameDurationNs
+                            )
+                            fitted.recycle()
+                            outFrameIndex++
 
-                            drainEncoder(encoder, muxer, bufferInfo, audioFormat, { vt, at, started ->
+                            drainEncoder(encoder, muxer, bufferInfo, ptsState, audioFormat, { vt, at, started ->
                                 videoTrackIdx = vt; audioTrackIdx = at; muxerStarted = started
                             }, { videoTrackIdx to muxerStarted })
 
@@ -722,25 +1066,38 @@ class VideoProcessor(private val context: Context) {
                         val tUs = i * stepUs
                         val f1 = r1.getFrameAtTime(min(tUs, d1 * 1000L), MediaMetadataRetriever.OPTION_CLOSEST)
                         val f2 = r2.getFrameAtTime(min(tUs, d2 * 1000L), MediaMetadataRetriever.OPTION_CLOSEST)
-                        val canvas = inputSurface.lockHardwareCanvas()
-                        try {
-                            canvas.drawColor(android.graphics.Color.BLACK)
+                        val combined = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
+                        Canvas(combined).apply {
+                            drawColor(android.graphics.Color.BLACK)
                             if (layout == VideoMergeLayout.SIDE_BY_SIDE) {
                                 val halfW = outW / 2f
-                                f1?.let { drawAspectFit(canvas, it, 0f, 0f, halfW, outH.toFloat(), paint) }
-                                f2?.let { drawAspectFit(canvas, it, halfW, 0f, halfW, outH.toFloat(), paint) }
+                                f1?.let { drawAspectFit(this, it, 0f, 0f, halfW, outH.toFloat(), paint) }
+                                f2?.let { drawAspectFit(this, it, halfW, 0f, halfW, outH.toFloat(), paint) }
                             } else {
                                 val halfH = outH / 2f
-                                f1?.let { drawAspectFit(canvas, it, 0f, 0f, outW.toFloat(), halfH, paint) }
-                                f2?.let { drawAspectFit(canvas, it, 0f, halfH, outW.toFloat(), halfH, paint) }
+                                f1?.let { drawAspectFit(this, it, 0f, 0f, outW.toFloat(), halfH, paint) }
+                                f2?.let { drawAspectFit(this, it, 0f, halfH, outW.toFloat(), halfH, paint) }
                             }
-                        } finally {
-                            inputSurface.unlockCanvasAndPost(canvas)
                         }
                         f1?.recycle()
                         f2?.recycle()
+                        drawFrameToSurface(
+                            surface = inputSurface,
+                            eglSurface = eglSurface,
+                            frame = combined,
+                            targetW = outW,
+                            targetH = outH,
+                            paint = paint,
+                            colorMatrix = null,
+                            shiftX = 0f,
+                            shiftY = 0f,
+                            cropScale = 1f,
+                            ptsNs = outFrameIndex * outFrameDurationNs
+                        )
+                        combined.recycle()
+                        outFrameIndex++
 
-                        drainEncoder(encoder, muxer, bufferInfo, audioFormat, { vt, at, started ->
+                        drainEncoder(encoder, muxer, bufferInfo, ptsState, audioFormat, { vt, at, started ->
                             videoTrackIdx = vt; audioTrackIdx = at; muxerStarted = started
                         }, { videoTrackIdx to muxerStarted })
 
@@ -756,24 +1113,11 @@ class VideoProcessor(private val context: Context) {
             }
 
             encoder.signalEndOfInputStream()
-            drainEncoderEnd(encoder, muxer, bufferInfo, { videoTrackIdx to muxerStarted })
+            drainEncoderEnd(encoder, muxer, bufferInfo, ptsState, { videoTrackIdx to muxerStarted })
 
             if (muxerStarted && audioTrackIdx >= 0 && primaryAudioExtractor != null && audioSrcTrack >= 0) {
                 onProgress(90, "Muxing audio track...")
-                primaryAudioExtractor.seekTo(0L, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
-                val aBuf = ByteBuffer.allocate(256 * 1024)
-                val aInfo = MediaCodec.BufferInfo()
-                while (true) {
-                    coroutineContext.ensureActive()
-                    val sampleSize = primaryAudioExtractor.readSampleData(aBuf, 0)
-                    if (sampleSize < 0) break
-                    aInfo.offset = 0
-                    aInfo.size = sampleSize
-                    aInfo.presentationTimeUs = primaryAudioExtractor.sampleTime.coerceAtLeast(0L)
-                    aInfo.flags = primaryAudioExtractor.sampleFlags
-                    muxer.writeSampleData(audioTrackIdx, aBuf, aInfo)
-                    primaryAudioExtractor.advance()
-                }
+                muxAudioRange(primaryAudioExtractor, muxer, audioTrackIdx, 0L, 0L, ptsState.lastWrittenPtsUs.coerceAtLeast(300_000L))
             }
 
             onProgress(100, "Merge complete")
@@ -781,6 +1125,7 @@ class VideoProcessor(private val context: Context) {
             runCatching { primaryAudioExtractor?.release() }
             runCatching { encoder.stop() }
             runCatching { encoder.release() }
+            runCatching { eglSurface?.release() }
             runCatching { inputSurface.release() }
             if (muxerStarted) runCatching { muxer.stop() }
             runCatching { muxer.release() }

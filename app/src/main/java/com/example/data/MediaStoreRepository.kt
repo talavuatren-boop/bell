@@ -14,6 +14,7 @@ import android.os.StatFs
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import com.example.model.MediaItemType
+import com.example.processing.MotionPhotoWriter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
@@ -37,7 +38,8 @@ class MediaStoreRepository(
         return runCatching {
             val path = context.getExternalFilesDir(null) ?: context.filesDir
             val stat = StatFs(path.absolutePath)
-            (stat.availableBlocksLong * stat.blockSizeLong) / (1024L * 1024L)
+            val statMb = (stat.availableBlocksLong * stat.blockSizeLong) / (1024L * 1024L)
+            if (statMb > 0L) statMb else (context.filesDir.usableSpace / (1024L * 1024L))
         }.getOrDefault(0L)
     }
 
@@ -305,6 +307,94 @@ class MediaStoreRepository(
         }
     }
 
+    /**
+     * Stores the companion MP4 clip inside app-private storage (`filesDir/live_clips`)
+     * so Android's MediaStore never surfaces it as a standalone video in the system gallery.
+     */
+    suspend fun saveLiveCompanionClipPrivately(
+        sourceFile: File,
+        pairId: String
+    ): Result<Uri> = withContext(Dispatchers.IO) {
+        if (!hasSufficientStorage(25L)) {
+            return@withContext Result.failure(IllegalStateException("Insufficient storage (< 25 MB free)"))
+        }
+        runCatching {
+            val dir = File(context.filesDir, "live_clips").apply { mkdirs() }
+            val safeId = pairId.replace(Regex("[^a-zA-Z0-9_-]"), "_")
+            val dest = File(dir, "live_$safeId.mp4")
+            sourceFile.inputStream().use { input ->
+                dest.outputStream().use { output ->
+                    input.copyTo(output, bufferSize = 64 * 1024)
+                    output.flush()
+                }
+            }
+            Uri.fromFile(dest)
+        }
+    }
+
+    /**
+     * Packages the saved JPEG in MediaStore.Images with standard Motion Photo XMP +
+     * appended MP4 stream so the device gallery treats it as a single Live / Motion Photo
+     * rather than a video file.
+     */
+    suspend fun attachMotionPhotoToSavedImage(
+        imageUri: Uri,
+        mp4File: File,
+        shutterOffsetUs: Long
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (!mp4File.exists() || mp4File.length() <= 1024L || mp4File.length() > 64L * 1024L * 1024L) {
+            return@withContext false
+        }
+        runCatching {
+            val jpegBytes = resolver.openInputStream(imageUri)?.use { it.readBytes() } ?: return@withContext false
+            val mp4Bytes = mp4File.readBytes()
+            val motionPhotoBytes = MotionPhotoWriter.embedMotionPhoto(
+                jpegBytes = jpegBytes,
+                mp4Bytes = mp4Bytes,
+                presentationTimestampUs = shutterOffsetUs
+            )
+            if (motionPhotoBytes.size <= jpegBytes.size) return@withContext false
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                runCatching {
+                    resolver.update(
+                        imageUri,
+                        ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 1) },
+                        null,
+                        null
+                    )
+                }
+            }
+            val written = try {
+                resolver.openFileDescriptor(imageUri, "rwt")?.use { pfd ->
+                    java.io.FileOutputStream(pfd.fileDescriptor).use { out ->
+                        out.write(motionPhotoBytes)
+                        out.flush()
+                    }
+                    true
+                } ?: false
+            } catch (_: Throwable) {
+                resolver.openOutputStream(imageUri, "wt")?.use { out ->
+                    out.write(motionPhotoBytes)
+                    out.flush()
+                    true
+                } ?: false
+            } finally {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    runCatching {
+                        resolver.update(
+                            imageUri,
+                            ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) },
+                            null,
+                            null
+                        )
+                    }
+                }
+            }
+            written
+        }.getOrDefault(false)
+    }
+
     suspend fun importExternalMediaUri(uri: Uri): Result<MediaAssetEntity> = withContext(Dispatchers.IO) {
         runCatching {
             val mime = resolver.getType(uri).orEmpty()
@@ -358,11 +448,18 @@ class MediaStoreRepository(
 
     suspend fun permanentlyDelete(asset: MediaAssetEntity) = withContext(Dispatchers.IO) {
         runCatching {
-            resolver.delete(Uri.parse(asset.mediaStoreUri), null, null)
+            val uri = Uri.parse(asset.mediaStoreUri)
+            if (uri.scheme == "file") uri.path?.let { File(it).delete() }
+            else resolver.delete(uri, null, null)
         }
         if (!asset.liveVideoUri.isNullOrBlank()) {
             runCatching {
-                resolver.delete(Uri.parse(asset.liveVideoUri), null, null)
+                val liveUri = Uri.parse(asset.liveVideoUri)
+                if (liveUri.scheme == "file") {
+                    liveUri.path?.let { File(it).delete() }
+                } else {
+                    resolver.delete(liveUri, null, null)
+                }
             }
         }
         if (!asset.gyroTrackPath.isNullOrBlank()) {

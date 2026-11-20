@@ -315,8 +315,9 @@ fun CameraScreen(
                 AndroidView(
                     factory = { ctx ->
                         TextureView(ctx).also { tv ->
+                            tv.setLayerType(android.view.View.LAYER_TYPE_HARDWARE, liveFilterPaint)
                             tv.setLayerPaint(liveFilterPaint)
-                            tv.addOnLayoutChangeListener { v, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
+                            tv.addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
                                 if ((right - left) != (oldRight - oldLeft) || (bottom - top) != (oldBottom - oldTop)) {
                                     viewModel.cameraEngine.refreshTextureTransform()
                                 }
@@ -325,6 +326,7 @@ fun CameraScreen(
                         }
                     },
                     update = { tv ->
+                        tv.setLayerType(android.view.View.LAYER_TYPE_HARDWARE, liveFilterPaint)
                         tv.setLayerPaint(liveFilterPaint)
                         tv.invalidate()
                         viewModel.cameraEngine.updateDisplayRotation(getDisplayRotationDegrees(tv.context))
@@ -1347,26 +1349,33 @@ private fun VideoQuickSpecStrip(
         profiles.forEach { profile ->
             profile.supportedFps.forEach { fps ->
                 val selected = profile.resolution == currentRes && fps == currentFps
+                val chipInteraction = remember(profile.resolution, fps) { MutableInteractionSource() }
                 Text(
                     text = "${profile.resolution.label}•${fps}",
-                    style = MonoTelemetrySmall,
+                    style = MonoTelemetrySmall.copy(fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal),
                     color = if (selected) PureBlack else PureWhite,
                     modifier = Modifier
+                        .springPressScale(chipInteraction, pressedScale = 0.88f)
                         .clip(RoundedCornerShape(10.dp))
                         .background(if (selected) accent else ElevatedObsidian)
-                        .clickable { onSelectResFps(profile.resolution, fps) }
+                        .clickable(interactionSource = chipInteraction, indication = null) {
+                            onSelectResFps(profile.resolution, fps)
+                        }
                         .padding(horizontal = 8.dp, vertical = 4.dp)
+                        .testTag("video_spec_${profile.resolution.label.lowercase()}_$fps")
                 )
             }
         }
+        val stabInteraction = remember { MutableInteractionSource() }
         Text(
             text = "STAB:${stabilization.label}",
             style = MonoTelemetrySmall,
             color = if (stabilization != StabilizationMode.OFF) accent else MutedSlate,
             modifier = Modifier
+                .springPressScale(stabInteraction, pressedScale = 0.88f)
                 .clip(RoundedCornerShape(10.dp))
                 .background(ElevatedObsidian)
-                .clickable(onClick = onCycleStab)
+                .clickable(interactionSource = stabInteraction, indication = null, onClick = onCycleStab)
                 .padding(horizontal = 8.dp, vertical = 4.dp)
                 .testTag("video_stab_toggle")
         )
