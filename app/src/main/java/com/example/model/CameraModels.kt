@@ -199,7 +199,20 @@ data class CameraLensInfo(
     val standardPhotoWidth: Int,
     val standardPhotoHeight: Int,
     val supportedVideoProfiles: List<VideoProfileOption>,
-    val supportedSlowMoModes: List<SlowMoOption>
+    val supportedSlowMoModes: List<SlowMoOption>,
+    val sensorPhysicalWidthMm: Float = 5.76f,
+    val sensorPhysicalHeightMm: Float = 4.29f,
+    val equivalentFocalLengthMm: Int = 24,
+    val opticalZoomRatio: Float = 1.0f,
+    val isLogicalMultiCamera: Boolean = false
+)
+
+data class ZoomStopPreset(
+    val label: String,
+    val targetZoomRatio: Float,
+    val equivalentFocalMm: Int,
+    val isOpticalLens: Boolean,
+    val backingLens: CameraLensInfo
 )
 
 data class VideoProfileOption(
@@ -318,6 +331,7 @@ data class VideoEditConfig(
     val contrast: Float = 1f,
     val saturation: Float = 1f,
     val temperature: Float = 0f,
+    val filter: PhotoFilterPreset = PhotoFilterPreset.NATURAL,
     val applyStabilization: Boolean = false,
     val applyDenoise: Boolean = false,
     val applySharpen: Boolean = false,

@@ -3,13 +3,26 @@ package com.example.ui.screens
 import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
 import android.net.Uri
+import android.os.Build
 import android.view.Surface
 import android.view.TextureView
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -26,7 +39,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
@@ -45,12 +57,16 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -62,6 +78,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.BlurredEdgeTreatment
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -74,7 +94,9 @@ import coil.compose.AsyncImage
 import com.example.data.MediaAssetEntity
 import com.example.model.MediaItemType
 import com.example.ui.MainViewModel
+import com.example.ui.components.SpringIconButton
 import com.example.ui.components.formatShutterSpeed
+import com.example.ui.components.springPressScale
 import com.example.ui.theme.CrimsonShutter
 import com.example.ui.theme.ElevatedObsidian
 import com.example.ui.theme.HairlineBorder
@@ -84,11 +106,13 @@ import com.example.ui.theme.MutedSlate
 import com.example.ui.theme.PureBlack
 import com.example.ui.theme.PureWhite
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.absoluteValue
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -119,6 +143,30 @@ fun MediaViewerScreen(
 
     var showInfoSheet by remember { mutableStateOf(false) }
     var audioEnabled by remember { mutableStateOf(true) }
+    var deletingAssetId by remember { mutableStateOf<Long?>(null) }
+    var pendingConfirmDeleteAsset by remember { mutableStateOf<MediaAssetEntity?>(null) }
+
+    val favoriteBounce = remember { Animatable(1f) }
+    LaunchedEffect(currentAsset.id, currentAsset.isFavorite) {
+        if (currentAsset.isFavorite) {
+            favoriteBounce.snapTo(1.38f)
+            favoriteBounce.animateTo(
+                targetValue = 1f,
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioMediumBouncy,
+                    stiffness = Spring.StiffnessMedium
+                )
+            )
+        } else {
+            favoriteBounce.snapTo(1f)
+        }
+    }
+
+    LaunchedEffect(assets.size) {
+        if (assets.isNotEmpty() && pagerState.currentPage >= assets.size) {
+            pagerState.scrollToPage((assets.size - 1).coerceAtLeast(0))
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -127,26 +175,60 @@ fun MediaViewerScreen(
     ) {
         HorizontalPager(
             state = pagerState,
+            key = { page -> assets[page].id },
             modifier = Modifier.fillMaxSize()
         ) { page ->
             val asset = assets[page]
-            when (asset.typeEnum) {
-                MediaItemType.VIDEO -> {
-                    VideoPlayerPane(
-                        uri = Uri.parse(asset.mediaStoreUri),
-                        audioEnabled = audioEnabled,
-                        isCurrentPage = pagerState.currentPage == page
+            val isBeingDeleted = deletingAssetId == asset.id
+            val pageOffset = ((pagerState.currentPage - page) + pagerState.currentPageOffsetFraction).absoluteValue
+            val pagerScale = (1f - (pageOffset.coerceIn(0f, 1f) * 0.06f))
+            val pagerAlpha = (1f - (pageOffset.coerceIn(0f, 1f) * 0.25f))
+
+            val deleteScale by animateFloatAsState(
+                targetValue = if (isBeingDeleted) 0.78f else 1f,
+                animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                label = "deletePageScale"
+            )
+            val deleteAlpha by animateFloatAsState(
+                targetValue = if (isBeingDeleted) 0f else 1f,
+                animationSpec = tween(durationMillis = 210, easing = FastOutSlowInEasing),
+                label = "deletePageAlpha"
+            )
+            val deleteShiftY by animateFloatAsState(
+                targetValue = if (isBeingDeleted) 120f else 0f,
+                animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                label = "deletePageShiftY"
+            )
+
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer(
+                        scaleX = pagerScale * deleteScale,
+                        scaleY = pagerScale * deleteScale,
+                        alpha = (pagerAlpha * deleteAlpha).coerceIn(0f, 1f),
+                        translationY = deleteShiftY
                     )
-                }
-                MediaItemType.LIVE_PHOTO -> {
-                    LivePhotoViewerPane(
-                        asset = asset,
-                        audioEnabled = audioEnabled,
-                        onHaptic = { viewModel.performHapticTick() }
-                    )
-                }
-                else -> {
-                    ZoomablePhotoPane(uri = asset.mediaStoreUri, contentDescription = asset.displayName)
+            ) {
+                when (asset.typeEnum) {
+                    MediaItemType.VIDEO -> {
+                        VideoPlayerPane(
+                            uri = Uri.parse(asset.mediaStoreUri),
+                            audioEnabled = audioEnabled,
+                            isCurrentPage = pagerState.currentPage == page
+                        )
+                    }
+                    MediaItemType.LIVE_PHOTO -> {
+                        LivePhotoViewerPane(
+                            asset = asset,
+                            audioEnabled = audioEnabled,
+                            isCurrentPage = pagerState.currentPage == page,
+                            onHaptic = { viewModel.performHapticTick() }
+                        )
+                    }
+                    else -> {
+                        ZoomablePhotoPane(uri = asset.mediaStoreUri, contentDescription = asset.displayName)
+                    }
                 }
             }
         }
@@ -162,18 +244,18 @@ fun MediaViewerScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(onClick = onBack, modifier = Modifier.testTag("viewer_back_button")) {
+            SpringIconButton(onClick = onBack, modifier = Modifier.testTag("viewer_back_button")) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = PureWhite)
             }
 
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
-                    text = if (currentAsset.typeEnum == MediaItemType.LIVE_PHOTO) "LIVE PHOTO • HOLD TO PLAY" else currentAsset.displayName,
+                    text = if (currentAsset.typeEnum == MediaItemType.LIVE_PHOTO) "LIVE PHOTO • TAP OR HOLD" else currentAsset.displayName,
                     style = MonoTelemetrySmall,
                     color = if (currentAsset.typeEnum == MediaItemType.LIVE_PHOTO) accent else PureWhite
                 )
                 Text(
-                    text = "${currentAsset.width}×${currentAsset.height}",
+                    text = "${pagerState.currentPage + 1}/${assets.size} • ${currentAsset.width}×${currentAsset.height}",
                     style = MonoTelemetrySmall,
                     color = MutedSlate
                 )
@@ -181,7 +263,7 @@ fun MediaViewerScreen(
 
             Row {
                 if (currentAsset.typeEnum == MediaItemType.VIDEO || currentAsset.typeEnum == MediaItemType.LIVE_PHOTO) {
-                    IconButton(
+                    SpringIconButton(
                         onClick = { audioEnabled = !audioEnabled },
                         modifier = Modifier.testTag("viewer_audio_toggle")
                     ) {
@@ -192,7 +274,7 @@ fun MediaViewerScreen(
                         )
                     }
                 }
-                IconButton(
+                SpringIconButton(
                     onClick = { showInfoSheet = true },
                     modifier = Modifier.testTag("viewer_info_button")
                 ) {
@@ -212,8 +294,12 @@ fun MediaViewerScreen(
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(
-                onClick = { scope.launch { viewModel.mediaRepo.toggleFavorite(currentAsset) } },
+            SpringIconButton(
+                onClick = {
+                    viewModel.performHapticTick()
+                    scope.launch { viewModel.mediaRepo.toggleFavorite(currentAsset) }
+                },
+                extraScale = favoriteBounce.value,
                 modifier = Modifier.testTag("viewer_favorite_button")
             ) {
                 Icon(
@@ -223,7 +309,7 @@ fun MediaViewerScreen(
                 )
             }
 
-            IconButton(
+            SpringIconButton(
                 onClick = {
                     val intent = viewModel.mediaRepo.buildShareIntent(currentAsset)
                     context.startActivity(android.content.Intent.createChooser(intent, "Share via HUNG CAM"))
@@ -233,7 +319,7 @@ fun MediaViewerScreen(
                 Icon(Icons.Default.Share, contentDescription = "Share", tint = PureWhite)
             }
 
-            IconButton(
+            SpringIconButton(
                 onClick = {
                     if (currentAsset.typeEnum == MediaItemType.VIDEO) onOpenVideoEditor(currentAsset)
                     else onOpenPhotoEditor(currentAsset)
@@ -243,29 +329,90 @@ fun MediaViewerScreen(
                 Icon(Icons.Default.Edit, contentDescription = "Edit Media", tint = PureWhite)
             }
 
-            IconButton(
+            SpringIconButton(
                 onClick = { onOpenAiStudio(currentAsset) },
                 modifier = Modifier.testTag("viewer_ai_button")
             ) {
                 Icon(Icons.Default.AutoAwesome, contentDescription = "Enhance in AI Studio", tint = accent)
             }
 
-            IconButton(
+            val isDeleteBusy = deletingAssetId != null
+            SpringIconButton(
                 onClick = {
-                    scope.launch {
-                        if (currentAsset.isDeleted) {
-                            viewModel.mediaRepo.permanentlyDelete(currentAsset)
-                        } else {
-                            viewModel.mediaRepo.moveToTrash(currentAsset)
-                        }
-                        if (assets.size <= 1) onBack()
-                    }
+                    if (isDeleteBusy) return@SpringIconButton
+                    viewModel.performHapticTick()
+                    pendingConfirmDeleteAsset = currentAsset
                 },
+                enabled = !isDeleteBusy,
+                pressedScale = 0.78f,
+                extraScale = if (deletingAssetId == currentAsset.id) 1.25f else 1f,
                 modifier = Modifier.testTag("viewer_delete_button")
             ) {
                 Icon(Icons.Default.Delete, contentDescription = "Delete", tint = CrimsonShutter)
             }
         }
+    }
+
+    pendingConfirmDeleteAsset?.let { target ->
+        val isTrashItem = target.isDeleted
+        AlertDialog(
+            onDismissRequest = { pendingConfirmDeleteAsset = null },
+            containerColor = ElevatedObsidian,
+            titleContentColor = PureWhite,
+            textContentColor = MutedSlate,
+            title = {
+                Text(if (isTrashItem) "Bạn có chắc muốn xóa vĩnh viễn?" else "Bạn có chắc muốn xóa không?")
+            },
+            text = {
+                Text(
+                    if (isTrashItem) {
+                        "Mục \"${target.displayName}\" sẽ bị xóa vĩnh viễn và không thể khôi phục."
+                    } else {
+                        "Mục \"${target.displayName}\" sẽ được chuyển vào Thùng rác (Trash)."
+                    }
+                )
+            },
+            confirmButton = {
+                val confirmInteraction = remember { MutableInteractionSource() }
+                Button(
+                    onClick = {
+                        pendingConfirmDeleteAsset = null
+                        viewModel.performHapticTick()
+                        val isLastItem = assets.size <= 1
+                        deletingAssetId = target.id
+                        scope.launch {
+                            delay(230L)
+                            if (target.isDeleted) {
+                                viewModel.mediaRepo.permanentlyDelete(target)
+                            } else {
+                                viewModel.mediaRepo.moveToTrash(target)
+                            }
+                            deletingAssetId = null
+                            if (isLastItem) onBack()
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = CrimsonShutter, contentColor = PureWhite),
+                    modifier = Modifier
+                        .springPressScale(confirmInteraction, pressedScale = 0.88f)
+                        .testTag("viewer_confirm_delete_button"),
+                    interactionSource = confirmInteraction
+                ) {
+                    Text(if (isTrashItem) "Xóa vĩnh viễn" else "Xóa")
+                }
+            },
+            dismissButton = {
+                val cancelInteraction = remember { MutableInteractionSource() }
+                TextButton(
+                    onClick = { pendingConfirmDeleteAsset = null },
+                    modifier = Modifier
+                        .springPressScale(cancelInteraction, pressedScale = 0.92f)
+                        .testTag("viewer_cancel_delete_button"),
+                    interactionSource = cancelInteraction
+                ) {
+                    Text("Hủy", color = PureWhite)
+                }
+            }
+        )
     }
 
     if (showInfoSheet) {
@@ -321,32 +468,67 @@ private fun InfoRow(label: String, value: String) {
 
 @Composable
 private fun ZoomablePhotoPane(uri: String, contentDescription: String) {
-    var scale by remember { mutableFloatStateOf(1f) }
-    var offsetX by remember { mutableFloatStateOf(0f) }
-    var offsetY by remember { mutableFloatStateOf(0f) }
+    var targetScale by remember(uri) { mutableFloatStateOf(1f) }
+    var targetOffsetX by remember(uri) { mutableFloatStateOf(0f) }
+    var targetOffsetY by remember(uri) { mutableFloatStateOf(0f) }
+
+    val animScale by animateFloatAsState(
+        targetValue = targetScale,
+        animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
+        label = "photoScale"
+    )
+    val animOffsetX by animateFloatAsState(
+        targetValue = targetOffsetX,
+        animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
+        label = "photoOffsetX"
+    )
+    val animOffsetY by animateFloatAsState(
+        targetValue = targetOffsetY,
+        animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
+        label = "photoOffsetY"
+    )
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .pointerInput(Unit) {
-                detectTransformGestures { _, pan, zoom, _ ->
-                    scale = (scale * zoom).coerceIn(1f, 5f)
-                    if (scale > 1f) {
-                        offsetX += pan.x
-                        offsetY += pan.y
-                    } else {
-                        offsetX = 0f
-                        offsetY = 0f
-                    }
+            // Custom pinch/pan detector: at 1x scale, single-finger drags stay unconsumed
+            // so HorizontalPager swipes left/right effortlessly across photos.
+            .pointerInput(uri) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    do {
+                        val event = awaitPointerEvent()
+                        val zoomChange = event.calculateZoom()
+                        val panChange = event.calculatePan()
+                        val pointerCount = event.changes.count { it.pressed }
+
+                        if (pointerCount >= 2 || targetScale > 1.03f || zoomChange != 1f) {
+                            val newScale = (targetScale * zoomChange).coerceIn(1f, 5f)
+                            targetScale = newScale
+                            if (newScale > 1.03f) {
+                                val maxOffsetX = (size.width * (newScale - 1f)) / 2f
+                                val maxOffsetY = (size.height * (newScale - 1f)) / 2f
+                                targetOffsetX = (targetOffsetX + panChange.x).coerceIn(-maxOffsetX, maxOffsetX)
+                                targetOffsetY = (targetOffsetY + panChange.y).coerceIn(-maxOffsetY, maxOffsetY)
+                                event.changes.forEach { it.consume() }
+                            } else {
+                                targetScale = 1f
+                                targetOffsetX = 0f
+                                targetOffsetY = 0f
+                            }
+                        }
+                    } while (event.changes.any { it.pressed })
                 }
             }
-            .pointerInput(Unit) {
+            .pointerInput(uri) {
                 detectTapGestures(
                     onDoubleTap = {
-                        if (scale > 1.1f) {
-                            scale = 1f; offsetX = 0f; offsetY = 0f
+                        if (targetScale > 1.1f) {
+                            targetScale = 1f
+                            targetOffsetX = 0f
+                            targetOffsetY = 0f
                         } else {
-                            scale = 2.5f
+                            targetScale = 2.5f
                         }
                     }
                 )
@@ -360,25 +542,34 @@ private fun ZoomablePhotoPane(uri: String, contentDescription: String) {
             modifier = Modifier
                 .fillMaxSize()
                 .graphicsLayer(
-                    scaleX = scale,
-                    scaleY = scale,
-                    translationX = offsetX,
-                    translationY = offsetY
+                    scaleX = animScale,
+                    scaleY = animScale,
+                    translationX = animOffsetX,
+                    translationY = animOffsetY
                 )
         )
     }
+}
+
+private enum class LivePlaybackPhase {
+    STILL,
+    PLAYING,
+    BLUR_SETTLE
 }
 
 @Composable
 private fun LivePhotoViewerPane(
     asset: MediaAssetEntity,
     audioEnabled: Boolean,
+    isCurrentPage: Boolean,
     onHaptic: () -> Unit
 ) {
     val context = LocalContext.current
     val accent = LocalAccentColor.current
-    var isPlayingLive by remember { mutableStateOf(false) }
-    var player by remember { mutableStateOf<MediaPlayer?>(null) }
+    var phase by remember(asset.id) { mutableStateOf(LivePlaybackPhase.STILL) }
+    var isVideoFrameReady by remember(asset.id) { mutableStateOf(false) }
+    var isLongPressHolding by remember(asset.id) { mutableStateOf(false) }
+    var player by remember(asset.id) { mutableStateOf<MediaPlayer?>(null) }
     var videoAspect by remember(asset.id) {
         val fallback = if (asset.width > 0 && asset.height > 0) asset.width.toFloat() / asset.height.toFloat() else 3f / 4f
         mutableFloatStateOf(fallback)
@@ -388,6 +579,44 @@ private fun LivePhotoViewerPane(
         val vUri = asset.liveVideoUri?.let { Uri.parse(it) } ?: return@LaunchedEffect
         val ratio = withContext(Dispatchers.IO) { readVideoDisplayAspect(context, vUri) }
         if (ratio != null && ratio > 0f) videoAspect = ratio
+    }
+
+    fun startLivePlayback() {
+        if (asset.liveVideoUri.isNullOrBlank()) return
+        onHaptic()
+        isVideoFrameReady = false
+        phase = LivePlaybackPhase.PLAYING
+    }
+
+    fun transitionToStillWithBlur() {
+        if (phase != LivePlaybackPhase.PLAYING) return
+        phase = LivePlaybackPhase.BLUR_SETTLE
+    }
+
+    // Smooth ~460ms optical blur & cross-dissolve settle before releasing/rewinding video layer
+    LaunchedEffect(phase) {
+        if (phase == LivePlaybackPhase.BLUR_SETTLE) {
+            delay(460L)
+            runCatching {
+                player?.pause()
+                player?.seekTo(0)
+            }
+            isVideoFrameReady = false
+            phase = LivePlaybackPhase.STILL
+        }
+    }
+
+    // Pause and reset cleanly when user swipes to another page
+    LaunchedEffect(isCurrentPage) {
+        if (!isCurrentPage && phase != LivePlaybackPhase.STILL) {
+            isLongPressHolding = false
+            runCatching {
+                player?.pause()
+                player?.seekTo(0)
+            }
+            isVideoFrameReady = false
+            phase = LivePlaybackPhase.STILL
+        }
     }
 
     DisposableEffect(asset.liveVideoUri) {
@@ -402,30 +631,109 @@ private fun LivePhotoViewerPane(
         runCatching { player?.setVolume(vol, vol) }
     }
 
+    // Animated optical blur + crossfade values
+    val showVideoSurface = phase != LivePlaybackPhase.STILL && !asset.liveVideoUri.isNullOrBlank()
+    val videoVisibleTarget = phase == LivePlaybackPhase.PLAYING && isVideoFrameReady
+
+    val videoAlpha by animateFloatAsState(
+        targetValue = if (videoVisibleTarget) 1f else 0f,
+        animationSpec = tween(
+            durationMillis = if (phase == LivePlaybackPhase.BLUR_SETTLE) 440 else 180,
+            easing = FastOutSlowInEasing
+        ),
+        label = "liveVideoAlpha"
+    )
+    val videoScale by animateFloatAsState(
+        targetValue = if (phase == LivePlaybackPhase.PLAYING) 1.035f else 1.0f,
+        animationSpec = tween(durationMillis = 440, easing = FastOutSlowInEasing),
+        label = "liveVideoScale"
+    )
+    val videoBlurDp by animateDpAsState(
+        targetValue = if (phase == LivePlaybackPhase.BLUR_SETTLE) 18.dp else 0.dp,
+        animationSpec = tween(durationMillis = 420, easing = FastOutSlowInEasing),
+        label = "liveVideoBlur"
+    )
+
+    // Still image stays mounted beneath; during BLUR_SETTLE it unblurs smoothly from 10.dp -> 0.dp
+    val stillBlurDp by animateDpAsState(
+        targetValue = when (phase) {
+            LivePlaybackPhase.BLUR_SETTLE -> 0.dp
+            LivePlaybackPhase.PLAYING -> 10.dp
+            LivePlaybackPhase.STILL -> 0.dp
+        },
+        animationSpec = tween(durationMillis = 440, easing = FastOutSlowInEasing),
+        label = "liveStillBlur"
+    )
+    val stillAlpha by animateFloatAsState(
+        targetValue = when (phase) {
+            LivePlaybackPhase.PLAYING -> if (isVideoFrameReady) 0.72f else 1f
+            LivePlaybackPhase.BLUR_SETTLE -> 1f
+            LivePlaybackPhase.STILL -> 1f
+        },
+        animationSpec = tween(durationMillis = 420, easing = FastOutSlowInEasing),
+        label = "liveStillAlpha"
+    )
+    val stillScale by animateFloatAsState(
+        targetValue = if (phase == LivePlaybackPhase.PLAYING) 1.018f else 1f,
+        animationSpec = tween(durationMillis = 440, easing = FastOutSlowInEasing),
+        label = "liveStillScale"
+    )
+    // Gentle misty veil during blur settle (ensures silky blur feel even below Android 12)
+    val mistOverlayAlpha by animateFloatAsState(
+        targetValue = if (phase == LivePlaybackPhase.BLUR_SETTLE) 0.14f else 0f,
+        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+        label = "liveMistAlpha"
+    )
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .pointerInput(asset.liveVideoUri) {
                 detectTapGestures(
-                    onLongPress = {
-                        if (!asset.liveVideoUri.isNullOrBlank()) {
-                            onHaptic()
-                            isPlayingLive = true
+                    onTap = {
+                        when (phase) {
+                            LivePlaybackPhase.STILL -> startLivePlayback()
+                            LivePlaybackPhase.PLAYING -> transitionToStillWithBlur()
+                            LivePlaybackPhase.BLUR_SETTLE -> Unit
                         }
+                    },
+                    onLongPress = {
+                        isLongPressHolding = true
+                        startLivePlayback()
                     },
                     onPress = {
                         tryAwaitRelease()
-                        isPlayingLive = false
-                        runCatching {
-                            player?.pause()
-                            player?.seekTo(0)
+                        if (isLongPressHolding) {
+                            isLongPressHolding = false
+                            transitionToStillWithBlur()
                         }
                     }
                 )
             },
         contentAlignment = Alignment.Center
     ) {
-        if (isPlayingLive && !asset.liveVideoUri.isNullOrBlank()) {
+        // Persistent crisp Still Photo base layer (never unmounted -> zero black flash)
+        val stillBlurModifier = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && stillBlurDp > 0.2.dp) {
+            Modifier.blur(stillBlurDp, BlurredEdgeTreatment.Rectangle)
+        } else {
+            Modifier
+        }
+        AsyncImage(
+            model = asset.mediaStoreUri,
+            contentDescription = asset.displayName,
+            contentScale = ContentScale.Fit,
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer(
+                    alpha = stillAlpha,
+                    scaleX = stillScale,
+                    scaleY = stillScale
+                )
+                .then(stillBlurModifier)
+        )
+
+        // Matched-aspect Live Video overlay
+        if (showVideoSurface) {
             val stillAspect = if (asset.width > 0 && asset.height > 0) {
                 asset.width.toFloat() / asset.height.toFloat()
             } else {
@@ -438,10 +746,22 @@ private fun LivePhotoViewerPane(
                 val coverW = if (videoAspect > stillAspect) frameH * videoAspect else frameW
                 val coverH = if (videoAspect > stillAspect) frameH else frameW / videoAspect
 
+                val vidBlurModifier = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && videoBlurDp > 0.2.dp) {
+                    Modifier.blur(videoBlurDp, BlurredEdgeTreatment.Rectangle)
+                } else {
+                    Modifier
+                }
+
                 Box(
                     modifier = Modifier
                         .requiredSize(frameW, frameH)
-                        .clipToBounds(),
+                        .clipToBounds()
+                        .graphicsLayer(
+                            alpha = videoAlpha,
+                            scaleX = videoScale,
+                            scaleY = videoScale
+                        )
+                        .then(vidBlurModifier),
                     contentAlignment = Alignment.Center
                 ) {
                     AndroidView(
@@ -452,10 +772,24 @@ private fun LivePhotoViewerPane(
                                         val mp = MediaPlayer().apply {
                                             setDataSource(ctx, Uri.parse(asset.liveVideoUri))
                                             setSurface(Surface(st))
-                                            isLooping = true
+                                            isLooping = false
                                             val vol = if (audioEnabled) 1f else 0f
                                             setVolume(vol, vol)
-                                            setOnPreparedListener { it.start() }
+                                            setOnInfoListener { _, what, _ ->
+                                                if (what == MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START) {
+                                                    isVideoFrameReady = true
+                                                }
+                                                false
+                                            }
+                                            setOnPreparedListener { readyMp ->
+                                                readyMp.start()
+                                                // Fallback in case a chipset omits MEDIA_INFO_VIDEO_RENDERING_START
+                                                postDelayed({ isVideoFrameReady = true }, 120L)
+                                            }
+                                            setOnCompletionListener {
+                                                isLongPressHolding = false
+                                                transitionToStillWithBlur()
+                                            }
                                             prepareAsync()
                                         }
                                         player = mp
@@ -474,29 +808,45 @@ private fun LivePhotoViewerPane(
                     )
                 }
             }
-        } else {
-            AsyncImage(
-                model = asset.mediaStoreUri,
-                contentDescription = asset.displayName,
-                contentScale = ContentScale.Fit,
-                modifier = Modifier.fillMaxSize()
+        }
+
+        // Soft atmospheric transition sheen during blur settle
+        if (mistOverlayAlpha > 0.01f) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.White.copy(alpha = mistOverlayAlpha))
             )
         }
 
-        // Subtle Live indicator pill
+        // Live indicator pill (tappable shortcut as well)
+        val livePillInteraction = remember(asset.id) { MutableInteractionSource() }
         Row(
             modifier = Modifier
                 .align(Alignment.BottomStart)
                 .padding(start = 16.dp, bottom = 92.dp)
-                .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(14.dp))
-                .border(0.75.dp, if (isPlayingLive) accent else HairlineBorder, RoundedCornerShape(14.dp))
+                .springPressScale(livePillInteraction, pressedScale = 0.90f)
+                .clip(RoundedCornerShape(14.dp))
+                .background(Color.Black.copy(alpha = 0.65f))
+                .border(0.75.dp, if (phase == LivePlaybackPhase.PLAYING) accent else HairlineBorder, RoundedCornerShape(14.dp))
+                .clickable(interactionSource = livePillInteraction, indication = null) {
+                    when (phase) {
+                        LivePlaybackPhase.STILL -> startLivePlayback()
+                        LivePlaybackPhase.PLAYING -> transitionToStillWithBlur()
+                        LivePlaybackPhase.BLUR_SETTLE -> Unit
+                    }
+                }
                 .padding(horizontal = 10.dp, vertical = 5.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(5.dp)
         ) {
             Icon(Icons.Default.MotionPhotosOn, contentDescription = null, tint = accent, modifier = Modifier.size(15.dp))
             Text(
-                text = if (isPlayingLive) "PLAYING LIVE ${asset.liveDurationSec}s" else "PRESS & HOLD FOR LIVE",
+                text = when (phase) {
+                    LivePlaybackPhase.STILL -> "TAP OR HOLD • LIVE ${asset.liveDurationSec}s"
+                    LivePlaybackPhase.PLAYING -> "PLAYING LIVE ${asset.liveDurationSec}s"
+                    LivePlaybackPhase.BLUR_SETTLE -> "BLUR TRANSITION..."
+                },
                 style = MonoTelemetrySmall,
                 color = PureWhite
             )
@@ -580,9 +930,9 @@ private fun VideoPlayerPane(
             modifier = fitMod
         )
 
-        IconButton(
+        SpringIconButton(
             onClick = {
-                val mp = mediaPlayer ?: return@IconButton
+                val mp = mediaPlayer ?: return@SpringIconButton
                 if (mp.isPlaying) {
                     mp.pause()
                     isPlaying = false
@@ -591,6 +941,7 @@ private fun VideoPlayerPane(
                     isPlaying = true
                 }
             },
+            pressedScale = 0.82f,
             modifier = Modifier
                 .size(60.dp)
                 .background(Color.Black.copy(alpha = 0.55f), CircleShape)

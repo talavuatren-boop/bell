@@ -73,6 +73,8 @@ fun HungCamApp(
 ) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val editorNotice by viewModel.editorExportNotice.collectAsStateWithLifecycle()
+    val activeAssets by viewModel.activeAssets.collectAsStateWithLifecycle()
+    val deletedAssets by viewModel.deletedAssets.collectAsStateWithLifecycle()
 
     var currentTab by remember { mutableStateOf(MainNavDestination.CAMERA) }
     var subScreen by remember { mutableStateOf<SubScreen>(SubScreen.None) }
@@ -97,9 +99,27 @@ fun HungCamApp(
 
         when (val sub = subScreen) {
             is SubScreen.Viewer -> {
+                val viewerIds = remember(sub.assets) { sub.assets.map { it.id }.toSet() }
+                val fromTrash = remember(sub.assets) { sub.assets.firstOrNull()?.isDeleted == true }
+                val liveAssets = remember(activeAssets, deletedAssets, viewerIds, fromTrash) {
+                    val pool = if (fromTrash) deletedAssets else activeAssets
+                    val filtered = pool.filter { it.id in viewerIds }
+                    filtered.ifEmpty { emptyList() }
+                }
+                val startId = remember(sub.assets, sub.index) {
+                    sub.assets.getOrNull(sub.index)?.id
+                }
+                val syncedAssets = if (liveAssets.isEmpty() && activeAssets.isEmpty() && deletedAssets.isEmpty()) {
+                    sub.assets
+                } else {
+                    liveAssets
+                }
+                val resolvedIndex = syncedAssets.indexOfFirst { it.id == startId }
+                    .takeIf { it >= 0 } ?: sub.index.coerceIn(0, (syncedAssets.size - 1).coerceAtLeast(0))
+
                 MediaViewerScreen(
-                    assets = sub.assets,
-                    initialIndex = sub.index,
+                    assets = syncedAssets,
+                    initialIndex = resolvedIndex,
                     viewModel = viewModel,
                     onBack = { subScreen = SubScreen.None },
                     onOpenPhotoEditor = { asset -> subScreen = SubScreen.PhotoEdit(asset) },

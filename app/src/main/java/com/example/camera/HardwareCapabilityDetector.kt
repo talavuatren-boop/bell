@@ -20,6 +20,7 @@ import com.example.model.VideoProfileOption
 import com.example.model.VideoResolutionPreset
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
 
 class HardwareCapabilityDetector(private val context: Context) {
 
@@ -67,7 +68,7 @@ class HardwareCapabilityDetector(private val context: Context) {
         }
 
         // Sort cleanly: Back main/wide/tele first, then Front
-        val sortedLenses = lenses.sortedWith(
+        val prelimSorted = lenses.sortedWith(
             compareBy<CameraLensInfo> {
                 when (it.lensFacing) {
                     CameraCharacteristics.LENS_FACING_BACK -> 0
@@ -77,6 +78,36 @@ class HardwareCapabilityDetector(private val context: Context) {
             }.thenBy { it.physicalId != null }
                 .thenBy { it.focalLengthMm }
         )
+
+        val mainBackEqFocal = prelimSorted.firstOrNull {
+            it.lensFacing == CameraCharacteristics.LENS_FACING_BACK && it.physicalId == null
+        }?.equivalentFocalLengthMm
+            ?: prelimSorted.firstOrNull { it.lensFacing == CameraCharacteristics.LENS_FACING_BACK }?.equivalentFocalLengthMm
+            ?: 24
+
+        val sortedLenses = prelimSorted.map { info ->
+            if (info.lensFacing != CameraCharacteristics.LENS_FACING_BACK) {
+                info.copy(opticalZoomRatio = 1.0f)
+            } else {
+                val rawRatio = info.equivalentFocalLengthMm.toFloat() / mainBackEqFocal.coerceAtLeast(1).toFloat()
+                val normalized = when {
+                    rawRatio in 0.85f..1.18f -> 1.0f
+                    rawRatio < 0.85f -> (Math.round(rawRatio * 10f) / 10f).coerceIn(0.4f, 0.8f)
+                    else -> (Math.round(rawRatio * 10f) / 10f).coerceIn(1.2f, 20f)
+                }
+                val upgradedLabel = when {
+                    info.physicalId == null && normalized == 1.0f -> "1x"
+                    normalized < 0.85f -> "${normalized}x"
+                    normalized >= 1.8f && normalized == normalized.toInt().toFloat() -> "${normalized.toInt()}x"
+                    normalized >= 1.5f -> "${normalized}x"
+                    else -> info.displayLabel
+                }
+                info.copy(
+                    opticalZoomRatio = normalized,
+                    displayLabel = upgradedLabel
+                )
+            }
+        }
 
         DeviceCapabilityReport(
             deviceModel = Build.MODEL,
@@ -104,6 +135,10 @@ class HardwareCapabilityDetector(private val context: Context) {
         val primaryFocal = focalLengths?.firstOrNull() ?: 4.7f
         val apertures = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_APERTURES)
         val primaryAperture = apertures?.firstOrNull() ?: 1.8f
+        val sensorSizeMm = chars.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+        val sensorW = sensorSizeMm?.width ?: 5.76f
+        val sensorH = sensorSizeMm?.height ?: 4.29f
+        val eqFocalMm = compute35mmEquivalentFocalMm(primaryFocal, sensorW, sensorH)
         val sensorOrientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
         val hwLevel = chars.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL)
             ?: CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY
@@ -118,6 +153,8 @@ class HardwareCapabilityDetector(private val context: Context) {
         val capabilities = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: IntArray(0)
         val supportsManual = capabilities.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)
         val supportsRaw = capabilities.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW)
+        val isLogicalMultiCam = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+            capabilities.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA)
         val hasFlash = chars.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) ?: false
 
         val oisModes = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION) ?: IntArray(0)
@@ -170,11 +207,9 @@ class HardwareCapabilityDetector(private val context: Context) {
 
         val displayLabel = when {
             facing == CameraCharacteristics.LENS_FACING_FRONT -> "Front"
-            physicalId != null && primaryFocal < 2.8f -> "0.6x UW"
-            physicalId != null && primaryFocal > 7.0f -> "2x Tele"
-            primaryFocal < 2.8f -> "0.6x UW"
-            primaryFocal > 7.0f -> "Tele"
-            else -> if (physicalId == null) "1x Main" else "Lens ${physicalId}"
+            eqFocalMm < 19 -> "0.6x"
+            eqFocalMm > 42 -> "${((eqFocalMm / 24f) * 10f).roundToInt() / 10f}x"
+            else -> if (physicalId == null) "1x" else "Lens $physicalId"
         }
 
         return CameraLensInfo(
@@ -205,8 +240,150 @@ class HardwareCapabilityDetector(private val context: Context) {
             standardPhotoWidth = stdPhoto.width,
             standardPhotoHeight = stdPhoto.height,
             supportedVideoProfiles = videoProfiles,
-            supportedSlowMoModes = slowMoOptions
+            supportedSlowMoModes = slowMoOptions,
+            sensorPhysicalWidthMm = sensorW,
+            sensorPhysicalHeightMm = sensorH,
+            equivalentFocalLengthMm = eqFocalMm,
+            opticalZoomRatio = 1.0f,
+            isLogicalMultiCamera = isLogicalMultiCam
         )
+    }
+
+    companion object {
+        fun compute35mmEquivalentFocalMm(focalMm: Float, sensorWidthMm: Float, sensorHeightMm: Float): Int {
+            if (focalMm <= 0f || sensorWidthMm <= 0f || sensorHeightMm <= 0f) return 24
+            val diag = kotlin.math.hypot(sensorWidthMm.toDouble(), sensorHeightMm.toDouble())
+            return ((focalMm * 43.2666) / diag).toInt().coerceIn(8, 600)
+        }
+
+        fun buildZoomStopPresets(
+            allLenses: List<CameraLensInfo>,
+            activeLens: CameraLensInfo?
+        ): List<com.example.model.ZoomStopPreset> {
+            val active = activeLens ?: return emptyList()
+            if (active.lensFacing == CameraCharacteristics.LENS_FACING_FRONT) {
+                val list = mutableListOf(
+                    com.example.model.ZoomStopPreset(
+                        label = "1x",
+                        targetZoomRatio = 1.0f,
+                        equivalentFocalMm = active.equivalentFocalLengthMm,
+                        isOpticalLens = true,
+                        backingLens = active
+                    )
+                )
+                if (active.maxZoom >= 1.95f) {
+                    list.add(
+                        com.example.model.ZoomStopPreset(
+                            label = "2x",
+                            targetZoomRatio = 2.0f,
+                            equivalentFocalMm = active.equivalentFocalLengthMm * 2,
+                            isOpticalLens = false,
+                            backingLens = active
+                        )
+                    )
+                }
+                return list
+            }
+
+            val backLenses = allLenses.filter { it.lensFacing == CameraCharacteristics.LENS_FACING_BACK }
+            val mainLens = backLenses.firstOrNull { it.physicalId == null && it.opticalZoomRatio in 0.9f..1.15f }
+                ?: backLenses.firstOrNull { it.opticalZoomRatio in 0.9f..1.15f }
+                ?: active
+            val mainEq = mainLens.equivalentFocalLengthMm
+            val stops = mutableListOf<com.example.model.ZoomStopPreset>()
+
+            // 1. Ultrawide (< 0.85x): prefer CONTROL_ZOOM_RATIO on logical camera if supported, else dedicated physical UW lens
+            val uwPhysical = backLenses.firstOrNull { it.opticalZoomRatio < 0.85f }
+            if (mainLens.minZoom <= 0.72f) {
+                val z = (Math.round(mainLens.minZoom.coerceAtLeast(0.5f) * 10f) / 10f)
+                stops.add(
+                    com.example.model.ZoomStopPreset(
+                        label = "${z}x",
+                        targetZoomRatio = z,
+                        equivalentFocalMm = (mainEq * z).toInt(),
+                        isOpticalLens = true,
+                        backingLens = mainLens
+                    )
+                )
+            } else if (uwPhysical != null) {
+                stops.add(
+                    com.example.model.ZoomStopPreset(
+                        label = "${uwPhysical.opticalZoomRatio}x",
+                        targetZoomRatio = 1.0f,
+                        equivalentFocalMm = uwPhysical.equivalentFocalLengthMm,
+                        isOpticalLens = true,
+                        backingLens = uwPhysical
+                    )
+                )
+            }
+
+            // 2. Primary 1x Main Wide lens
+            stops.add(
+                com.example.model.ZoomStopPreset(
+                    label = "1x",
+                    targetZoomRatio = 1.0f,
+                    equivalentFocalMm = mainEq,
+                    isOpticalLens = true,
+                    backingLens = mainLens
+                )
+            )
+
+            // 3. Dedicated 2x (physical 2x optical tele OR smooth 2x in-sensor/digital zoom on main lens)
+            val tele2x = backLenses.firstOrNull { it.opticalZoomRatio in 1.75f..2.3f }
+            if (tele2x != null && !(mainLens.isLogicalMultiCamera && mainLens.maxZoom >= 2.0f)) {
+                stops.add(
+                    com.example.model.ZoomStopPreset(
+                        label = "2x",
+                        targetZoomRatio = 1.0f,
+                        equivalentFocalMm = tele2x.equivalentFocalLengthMm,
+                        isOpticalLens = true,
+                        backingLens = tele2x
+                    )
+                )
+            } else if (mainLens.maxZoom >= 2.0f) {
+                stops.add(
+                    com.example.model.ZoomStopPreset(
+                        label = "2x",
+                        targetZoomRatio = 2.0f,
+                        equivalentFocalMm = mainEq * 2,
+                        isOpticalLens = tele2x != null,
+                        backingLens = mainLens
+                    )
+                )
+            }
+
+            // 4. Optional higher optical tele (> 2.5x) or 5x telephoto shortcut when maxZoom >= 5x
+            val highTele = backLenses.firstOrNull { it.opticalZoomRatio >= 2.6f }
+            if (highTele != null) {
+                val lbl = if (highTele.opticalZoomRatio == highTele.opticalZoomRatio.toInt().toFloat()) {
+                    "${highTele.opticalZoomRatio.toInt()}x"
+                } else {
+                    "${highTele.opticalZoomRatio}x"
+                }
+                val useLogical = mainLens.isLogicalMultiCamera && mainLens.maxZoom >= highTele.opticalZoomRatio
+                stops.add(
+                    com.example.model.ZoomStopPreset(
+                        label = lbl,
+                        targetZoomRatio = if (useLogical) highTele.opticalZoomRatio else 1.0f,
+                        equivalentFocalMm = highTele.equivalentFocalLengthMm,
+                        isOpticalLens = true,
+                        backingLens = if (useLogical) mainLens else highTele
+                    )
+                )
+            } else if (mainLens.maxZoom >= 5.0f) {
+                stops.add(
+                    com.example.model.ZoomStopPreset(
+                        label = "5x",
+                        targetZoomRatio = 5.0f,
+                        equivalentFocalMm = mainEq * 5,
+                        isOpticalLens = false,
+                        backingLens = mainLens
+                    )
+                )
+            }
+
+            return stops.distinctBy { it.label }
+        }
     }
 
     private fun detectVideoProfiles(

@@ -6,10 +6,13 @@ import android.view.TextureView
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
@@ -37,6 +40,7 @@ import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.BlurOn
 import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.EmojiEmotions
+import androidx.compose.material.icons.filled.FilterVintage
 import androidx.compose.material.icons.filled.FlashAuto
 import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.material.icons.filled.FlashOn
@@ -91,10 +95,13 @@ import com.example.model.AspectRatioMode
 import com.example.model.CameraMode
 import com.example.model.FlashMode
 import com.example.model.LivePhotoDuration
+import com.example.model.PhotoFilterPreset
 import com.example.model.ProCaptureType
 import com.example.model.SelfTimerDuration
 import com.example.model.StabilizationMode
 import com.example.model.TimelapseSpeed
+import com.example.camera.HardwareCapabilityDetector
+import com.example.processing.ImageProcessor
 import com.example.ui.MainViewModel
 import com.example.ui.components.ElectronicLevelOverlay
 import com.example.ui.components.FocusPeakingOverlay
@@ -102,7 +109,9 @@ import com.example.ui.components.GridOverlay
 import com.example.ui.components.LiveHistogramHud
 import com.example.ui.components.ProControlDeck
 import com.example.ui.components.SelfTimerCountdownHud
+import com.example.ui.components.SpringIconButton
 import com.example.ui.components.TapFocusReticle
+import com.example.ui.components.springPressScale
 import com.example.ui.theme.CardSlate
 import com.example.ui.theme.CrimsonShutter
 import com.example.ui.theme.ElevatedObsidian
@@ -142,6 +151,7 @@ fun CameraScreen(
     val focusPeaking by viewModel.focusPeakingData.collectAsStateWithLifecycle()
     val timelapseSpeed by viewModel.timelapseSpeed.collectAsStateWithLifecycle()
     val slowMoOption by viewModel.slowMoOption.collectAsStateWithLifecycle()
+    val activeFilter by viewModel.cameraFilter.collectAsStateWithLifecycle()
     val assets by viewModel.activeAssets.collectAsStateWithLifecycle()
 
     var hasCameraPerm by remember {
@@ -185,6 +195,7 @@ fun CameraScreen(
     var showFocusReticle by remember { mutableStateOf(false) }
     var showZoomSlider by remember { mutableStateOf(false) }
     var showMoreModesPanel by remember { mutableStateOf(false) }
+    var showFilterStrip by remember { mutableStateOf(false) }
 
     LaunchedEffect(focusPoint) {
         if (focusPoint != null) {
@@ -290,9 +301,21 @@ fun CameraScreen(
                         }
                     }
             ) {
+                val liveFilterPaint = remember(activeFilter) {
+                    if (activeFilter == PhotoFilterPreset.NATURAL) {
+                        null
+                    } else {
+                        android.graphics.Paint().apply {
+                            colorFilter = android.graphics.ColorMatrixColorFilter(
+                                ImageProcessor.buildFilterColorMatrix(activeFilter)
+                            )
+                        }
+                    }
+                }
                 AndroidView(
                     factory = { ctx ->
                         TextureView(ctx).also { tv ->
+                            tv.setLayerPaint(liveFilterPaint)
                             tv.addOnLayoutChangeListener { v, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
                                 if ((right - left) != (oldRight - oldLeft) || (bottom - top) != (oldBottom - oldTop)) {
                                     viewModel.cameraEngine.refreshTextureTransform()
@@ -302,6 +325,8 @@ fun CameraScreen(
                         }
                     },
                     update = { tv ->
+                        tv.setLayerPaint(liveFilterPaint)
+                        tv.invalidate()
                         viewModel.cameraEngine.updateDisplayRotation(getDisplayRotationDegrees(tv.context))
                     },
                     modifier = Modifier.fillMaxSize()
@@ -374,8 +399,12 @@ fun CameraScreen(
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Box(modifier = Modifier.size(6.dp).background(accent, CircleShape))
-                    val opticText = activeLens?.let {
-                        "HUNG CAM • ${it.focalLengthMm}mm f/${it.aperture}"
+                    val opticText = activeLens?.let { lens ->
+                        val effEqMm = (lens.equivalentFocalLengthMm * runtime.activeZoom).toInt().coerceAtLeast(10)
+                        val isOptical = kotlin.math.abs(runtime.activeZoom - 1.0f) < 0.06f ||
+                            (lens.isLogicalMultiCamera && runtime.activeZoom <= 0.72f)
+                        val opticTag = if (isOptical) "OPTIC" else String.format("%.1fx", runtime.activeZoom)
+                        "HUNG CAM • ${effEqMm}mm f/${lens.aperture} • $opticTag"
                     } ?: "HUNG CAM • OPTICS"
                     Text(
                         text = opticText,
@@ -385,16 +414,54 @@ fun CameraScreen(
                 }
 
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    val filterBtnInteraction = remember { MutableInteractionSource() }
+                    val filterIsActive = activeFilter != PhotoFilterPreset.NATURAL || showFilterStrip
+                    Row(
+                        modifier = Modifier
+                            .springPressScale(filterBtnInteraction, pressedScale = 0.9f)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (filterIsActive) accent.copy(alpha = 0.22f) else Color.Black.copy(alpha = 0.58f))
+                            .border(
+                                0.75.dp,
+                                if (filterIsActive) accent else HairlineBorder,
+                                RoundedCornerShape(12.dp)
+                            )
+                            .clickable(interactionSource = filterBtnInteraction, indication = null) {
+                                viewModel.performHapticTick()
+                                showFilterStrip = !showFilterStrip
+                            }
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                            .testTag("camera_filter_toggle"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.FilterVintage,
+                            contentDescription = "Bộ lọc Ảnh & Video",
+                            tint = if (filterIsActive) accent else PureWhite,
+                            modifier = Modifier.size(13.dp)
+                        )
+                        Text(
+                            text = if (activeFilter == PhotoFilterPreset.NATURAL) "Bộ lọc" else activeFilter.label,
+                            style = MonoTelemetrySmall.copy(fontSize = 10.sp, fontWeight = FontWeight.SemiBold),
+                            color = if (filterIsActive) accent else PureWhite
+                        )
+                    }
                     val latestPhoto = assets.firstOrNull {
                         it.typeEnum != com.example.model.MediaItemType.VIDEO
                     }
                     if (latestPhoto != null) {
+                        val memeInteraction = remember { MutableInteractionSource() }
                         Row(
                             modifier = Modifier
+                                .springPressScale(memeInteraction, pressedScale = 0.9f)
                                 .clip(RoundedCornerShape(12.dp))
                                 .background(Color.Black.copy(alpha = 0.58f))
                                 .border(0.75.dp, accent.copy(alpha = 0.45f), RoundedCornerShape(12.dp))
-                                .clickable { onOpenStickersMeme(latestPhoto) }
+                                .clickable(interactionSource = memeInteraction, indication = null) {
+                                    viewModel.performHapticTick()
+                                    onOpenStickersMeme(latestPhoto)
+                                }
                                 .padding(horizontal = 8.dp, vertical = 4.dp)
                                 .testTag("camera_quick_meme_button"),
                             verticalAlignment = Alignment.CenterVertically,
@@ -405,12 +472,17 @@ fun CameraScreen(
                         }
                     }
                     if (mode == CameraMode.VIDEO || (mode == CameraMode.PRO && proCaptureType == ProCaptureType.VIDEO)) {
+                        val mergeInteraction = remember { MutableInteractionSource() }
                         Row(
                             modifier = Modifier
+                                .springPressScale(mergeInteraction, pressedScale = 0.9f)
                                 .clip(RoundedCornerShape(12.dp))
                                 .background(Color.Black.copy(alpha = 0.58f))
                                 .border(0.75.dp, HairlineBorder, RoundedCornerShape(12.dp))
-                                .clickable(onClick = onOpenVideoMerge)
+                                .clickable(interactionSource = mergeInteraction, indication = null) {
+                                    viewModel.performHapticTick()
+                                    onOpenVideoMerge()
+                                }
                                 .padding(horizontal = 8.dp, vertical = 4.dp)
                                 .testTag("camera_quick_merge_button"),
                             verticalAlignment = Alignment.CenterVertically,
@@ -432,7 +504,7 @@ fun CameraScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 // Flash
-                IconButton(
+                SpringIconButton(
                     onClick = { viewModel.cycleFlashMode() },
                     enabled = activeLens?.hasFlash == true,
                     modifier = Modifier.testTag("camera_flash_button")
@@ -452,11 +524,15 @@ fun CameraScreen(
 
                 // Live Photo Pill integrated directly into PHOTO mode (OFF / 2s / 3s / 5s)
                 if (mode == CameraMode.PHOTO) {
+                    val liveInteraction = remember { MutableInteractionSource() }
                     Row(
                         modifier = Modifier
+                            .springPressScale(liveInteraction, pressedScale = 0.88f)
                             .clip(RoundedCornerShape(16.dp))
                             .background(if (liveDuration != LivePhotoDuration.OFF) accent.copy(alpha = 0.18f) else Color.Transparent)
-                            .clickable { viewModel.cycleLiveDuration() }
+                            .clickable(interactionSource = liveInteraction, indication = null) {
+                                viewModel.cycleLiveDuration()
+                            }
                             .padding(horizontal = 10.dp, vertical = 6.dp)
                             .testTag("camera_live_toggle"),
                         verticalAlignment = Alignment.CenterVertically,
@@ -477,10 +553,14 @@ fun CameraScreen(
                 }
 
                 // Self-Timer
+                val timerInteraction = remember { MutableInteractionSource() }
                 Row(
                     modifier = Modifier
+                        .springPressScale(timerInteraction, pressedScale = 0.88f)
                         .clip(RoundedCornerShape(16.dp))
-                        .clickable { viewModel.cycleSelfTimer() }
+                        .clickable(interactionSource = timerInteraction, indication = null) {
+                            viewModel.cycleSelfTimer()
+                        }
                         .padding(horizontal = 8.dp, vertical = 6.dp)
                         .testTag("camera_timer_button"),
                     verticalAlignment = Alignment.CenterVertically,
@@ -498,10 +578,16 @@ fun CameraScreen(
                 }
 
                 // Aspect Ratio (locked to 16:9 in video modes to match hardware recording stream)
+                val aspectInteraction = remember { MutableInteractionSource() }
                 Row(
                     modifier = Modifier
+                        .springPressScale(aspectInteraction, pressedScale = 0.88f)
                         .clip(RoundedCornerShape(16.dp))
-                        .clickable(enabled = !isVideoFamilyActive) { viewModel.cycleAspectRatio() }
+                        .clickable(
+                            interactionSource = aspectInteraction,
+                            indication = null,
+                            enabled = !isVideoFamilyActive
+                        ) { viewModel.cycleAspectRatio() }
                         .padding(horizontal = 8.dp, vertical = 6.dp)
                         .testTag("camera_aspect_button"),
                     verticalAlignment = Alignment.CenterVertically,
@@ -521,7 +607,7 @@ fun CameraScreen(
                 }
 
                 // Grid & Level toggles
-                IconButton(
+                SpringIconButton(
                     onClick = { viewModel.cycleGridType() },
                     modifier = Modifier.testTag("camera_grid_button")
                 ) {
@@ -532,7 +618,7 @@ fun CameraScreen(
                     )
                 }
 
-                IconButton(
+                SpringIconButton(
                     onClick = {
                         viewModel.updateSettings { it.copy(electronicLevelEnabled = !it.electronicLevelEnabled) }
                     },
@@ -564,14 +650,31 @@ fun CameraScreen(
                             showExposureWarning = proParams.exposureWarningEnabled
                         )
                         if (proCaptureType == ProCaptureType.VIDEO) {
+                            val combos = remember(activeLens) {
+                                activeLens?.supportedVideoProfiles.orEmpty().flatMap { p ->
+                                    p.supportedFps.map { fps -> p.resolution to fps }
+                                }
+                            }
                             Text(
-                                text = "${settings.videoResolution.label}•${settings.videoFps}fps",
+                                text = "${settings.videoResolution.label}•${settings.videoFps}fps ▾",
                                 style = MonoTelemetrySmall,
                                 color = accent,
                                 modifier = Modifier
-                                    .background(Color.Black.copy(alpha = 0.62f), RoundedCornerShape(10.dp))
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(Color.Black.copy(alpha = 0.62f))
                                     .border(0.75.dp, HairlineBorder, RoundedCornerShape(10.dp))
+                                    .clickable(enabled = combos.isNotEmpty() && !runtime.isRecording) {
+                                        val curIdx = combos.indexOfFirst {
+                                            it.first == settings.videoResolution && it.second == settings.videoFps
+                                        }
+                                        val next = combos[(curIdx + 1) % combos.size]
+                                        viewModel.updateSettings {
+                                            it.copy(videoResolution = next.first, videoFps = next.second)
+                                        }
+                                        viewModel.performHapticTick()
+                                    }
                                     .padding(horizontal = 8.dp, vertical = 4.dp)
+                                    .testTag("pro_video_spec_cycle")
                             )
                         }
                     }
@@ -777,6 +880,71 @@ fun CameraScreen(
                 }
             }
 
+            // Live Filter Selector Strip for Photo & Video (preview live before capture/record)
+            AnimatedVisibility(visible = showFilterStrip) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .background(Color.Black.copy(alpha = 0.72f), RoundedCornerShape(20.dp))
+                        .border(0.75.dp, HairlineBorder, RoundedCornerShape(20.dp))
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    PhotoFilterPreset.entries.forEach { preset ->
+                        val selected = activeFilter == preset
+                        val swatchColor = when (preset) {
+                            PhotoFilterPreset.NATURAL -> PureWhite.copy(alpha = 0.75f)
+                            PhotoFilterPreset.VIVID -> Color(0xFFFF5E57)
+                            PhotoFilterPreset.WARM -> Color(0xFFFFB142)
+                            PhotoFilterPreset.COOL -> Color(0xFF4BCFFA)
+                            PhotoFilterPreset.FILM -> Color(0xFF34ACE0)
+                            PhotoFilterPreset.VINTAGE -> Color(0xFFD1A36C)
+                            PhotoFilterPreset.CINEMATIC -> Color(0xFF0FB9B1)
+                            PhotoFilterPreset.BW -> Color(0xFF84817A)
+                        }
+                        val filterInteraction = remember(preset) { MutableInteractionSource() }
+                        Row(
+                            modifier = Modifier
+                                .springPressScale(filterInteraction, pressedScale = 0.88f)
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(if (selected) accent else ElevatedObsidian)
+                                .border(
+                                    width = if (selected) 1.dp else 0.75.dp,
+                                    color = if (selected) accent else HairlineBorder,
+                                    shape = RoundedCornerShape(14.dp)
+                                )
+                                .clickable(
+                                    interactionSource = filterInteraction,
+                                    indication = null,
+                                    enabled = !runtime.isRecording
+                                ) {
+                                    viewModel.setCameraFilter(preset)
+                                }
+                                .padding(horizontal = 10.dp, vertical = 5.dp)
+                                .testTag("camera_filter_${preset.name.lowercase()}"),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(9.dp)
+                                    .clip(CircleShape)
+                                    .background(swatchColor)
+                            )
+                            Text(
+                                text = preset.label,
+                                style = MonoTelemetrySmall.copy(
+                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
+                                ),
+                                color = if (selected) PureBlack else PureWhite
+                            )
+                        }
+                    }
+                }
+            }
+
             // Zoom Slider (expandable on tap)
             AnimatedVisibility(visible = showZoomSlider && activeLens != null) {
                 activeLens?.let { lens ->
@@ -799,45 +967,77 @@ fun CameraScreen(
                 }
             }
 
-            // Physical Lens & Zoom Pills
+            // Physical Optical & 0.6x / 1x / 2x / 5x Zoom Pills (active in both Photo & Video)
+            val zoomStops = remember(capabilities?.lenses, activeLens) {
+                HardwareCapabilityDetector.buildZoomStopPresets(
+                    allLenses = capabilities?.lenses.orEmpty(),
+                    activeLens = activeLens
+                )
+            }
             Row(
                 modifier = Modifier
                     .background(Color.Black.copy(alpha = 0.68f), RoundedCornerShape(22.dp))
                     .border(0.75.dp, HairlineBorder, RoundedCornerShape(22.dp))
                     .padding(horizontal = 6.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                val backLenses = capabilities?.lenses
-                    ?.filter { it.lensFacing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_BACK }
-                    ?.distinctBy { it.displayLabel }
-                    .orEmpty()
-
-                backLenses.forEach { lensOption ->
-                    val selected = activeLens?.cameraId == lensOption.cameraId &&
-                        activeLens?.physicalId == lensOption.physicalId
-                    Text(
-                        text = lensOption.displayLabel,
-                        style = MonoTelemetrySmall.copy(fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium),
-                        color = if (selected) PureBlack else PureWhite,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(if (selected) accent else Color.Transparent)
-                            .clickable { viewModel.selectLens(lensOption) }
-                            .padding(horizontal = 10.dp, vertical = 5.dp)
-                            .testTag("lens_pill_${lensOption.displayLabel}")
+                zoomStops.forEach { stop ->
+                    val sameBacking = activeLens?.cameraId == stop.backingLens.cameraId &&
+                        activeLens?.physicalId == stop.backingLens.physicalId
+                    val isSelected = sameBacking &&
+                        kotlin.math.abs(runtime.activeZoom - stop.targetZoomRatio) < 0.22f
+                    val pillScale by animateFloatAsState(
+                        targetValue = if (isSelected) 1.06f else 1f,
+                        animationSpec = spring(
+                            dampingRatio = Spring.DampingRatioMediumBouncy,
+                            stiffness = Spring.StiffnessMedium
+                        ),
+                        label = "zoomPillScale"
                     )
+                    val stopInteraction = remember { MutableInteractionSource() }
+                    Row(
+                        modifier = Modifier
+                            .springPressScale(stopInteraction, pressedScale = 0.86f, extraScale = pillScale)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(if (isSelected) accent else Color.Transparent)
+                            .clickable(interactionSource = stopInteraction, indication = null) {
+                                viewModel.selectZoomStop(stop)
+                            }
+                            .padding(horizontal = 10.dp, vertical = 5.dp)
+                            .testTag("lens_pill_${stop.label}"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(3.dp)
+                    ) {
+                        Text(
+                            text = stop.label,
+                            style = MonoTelemetrySmall.copy(fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium),
+                            color = if (isSelected) PureBlack else PureWhite
+                        )
+                        if (isSelected) {
+                            Text(
+                                text = "${stop.equivalentFocalMm}mm",
+                                style = MonoTelemetrySmall.copy(fontSize = 9.sp, fontWeight = FontWeight.SemiBold),
+                                color = PureBlack.copy(alpha = 0.78f)
+                            )
+                        }
+                    }
                 }
 
+                val zoomToggleInteraction = remember { MutableInteractionSource() }
                 Text(
                     text = String.format("%.1fx", runtime.activeZoom),
                     style = MonoTelemetrySmall.copy(fontWeight = FontWeight.Bold),
                     color = accent,
                     modifier = Modifier
+                        .springPressScale(zoomToggleInteraction, pressedScale = 0.88f)
                         .clip(RoundedCornerShape(14.dp))
                         .background(ElevatedObsidian)
                         .border(0.75.dp, accent.copy(alpha = 0.4f), RoundedCornerShape(14.dp))
-                        .clickable { showZoomSlider = !showZoomSlider }
+                        .clickable(interactionSource = zoomToggleInteraction, indication = null) {
+                            viewModel.performHapticTick()
+                            showZoomSlider = !showZoomSlider
+                        }
                         .padding(horizontal = 10.dp, vertical = 5.dp)
                         .testTag("zoom_pill_toggle")
                 )
@@ -912,6 +1112,7 @@ fun CameraScreen(
             ) {
                 CameraMode.primaryBarModes.forEach { itemMode ->
                     val selected = mode == itemMode
+                    val modeInteraction = remember(itemMode) { MutableInteractionSource() }
                     Text(
                         text = itemMode.label,
                         style = MaterialTheme.typography.labelLarge.copy(
@@ -920,13 +1121,14 @@ fun CameraScreen(
                         ),
                         color = if (selected) accent else PureWhite.copy(alpha = 0.72f),
                         modifier = Modifier
+                            .springPressScale(modeInteraction, pressedScale = 0.90f)
                             .clip(RoundedCornerShape(14.dp))
                             .background(if (selected) accent.copy(alpha = 0.14f) else Color.Transparent)
                             .then(
                                 if (selected) Modifier.border(0.75.dp, accent.copy(alpha = 0.45f), RoundedCornerShape(14.dp))
                                 else Modifier
                             )
-                            .clickable {
+                            .clickable(interactionSource = modeInteraction, indication = null) {
                                 showMoreModesPanel = false
                                 viewModel.setCameraMode(itemMode)
                             }
@@ -936,8 +1138,10 @@ fun CameraScreen(
                 }
 
                 // "Thêm" Button for PRO (Photo/Video), Slow-Mo, Timelapse
+                val moreInteraction = remember { MutableInteractionSource() }
                 Row(
                     modifier = Modifier
+                        .springPressScale(moreInteraction, pressedScale = 0.90f)
                         .clip(RoundedCornerShape(14.dp))
                         .background(
                             if (isExtraModeActive || showMoreModesPanel) accent.copy(alpha = 0.16f) else Color.Transparent
@@ -947,7 +1151,9 @@ fun CameraScreen(
                             if (isExtraModeActive || showMoreModesPanel) accent.copy(alpha = 0.55f) else HairlineBorder,
                             RoundedCornerShape(14.dp)
                         )
-                        .clickable { showMoreModesPanel = !showMoreModesPanel }
+                        .clickable(interactionSource = moreInteraction, indication = null) {
+                            showMoreModesPanel = !showMoreModesPanel
+                        }
                         .padding(horizontal = 11.dp, vertical = 6.dp)
                         .testTag("mode_tab_more"),
                     verticalAlignment = Alignment.CenterVertically,
@@ -981,7 +1187,7 @@ fun CameraScreen(
                 // Left: Last captured thumbnail or Pause/Resume during video recording
                 if (runtime.isRecording) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        IconButton(
+                        SpringIconButton(
                             onClick = { viewModel.cameraEngine.pauseOrResumeVideoRecording() },
                             modifier = Modifier
                                 .size(50.dp)
@@ -995,7 +1201,7 @@ fun CameraScreen(
                                 tint = PureWhite
                             )
                         }
-                        IconButton(
+                        SpringIconButton(
                             onClick = { viewModel.cameraEngine.toggleRecordingAudioMute() },
                             modifier = Modifier
                                 .size(50.dp)
@@ -1012,13 +1218,15 @@ fun CameraScreen(
                     }
                 } else {
                     val latest = assets.firstOrNull()
+                    val thumbInteraction = remember { MutableInteractionSource() }
                     Box(
                         modifier = Modifier
                             .size(52.dp)
+                            .springPressScale(thumbInteraction, pressedScale = 0.88f)
                             .clip(RoundedCornerShape(14.dp))
                             .background(ElevatedObsidian)
                             .border(1.5.dp, HairlineBorder, RoundedCornerShape(14.dp))
-                            .clickable(onClick = onOpenGallery)
+                            .clickable(interactionSource = thumbInteraction, indication = null, onClick = onOpenGallery)
                             .testTag("camera_thumbnail_button"),
                         contentAlignment = Alignment.Center
                     ) {
@@ -1041,7 +1249,11 @@ fun CameraScreen(
 
                 // Center: Tactile Double-Ring Pro Shutter / Record Button
                 val isVideoFamily = isVideoFamilyActive
-                val shutterScale by animateFloatAsState(if (runtime.isCapturing) 0.88f else 1f, label = "shutterScale")
+                val shutterScale by animateFloatAsState(
+                    targetValue = if (runtime.isCapturing) 0.86f else 1f,
+                    animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium),
+                    label = "shutterScale"
+                )
                 val outerRingColor = when {
                     runtime.isRecording || isVideoFamily -> CrimsonShutter
                     mode == CameraMode.PRO || mode == CameraMode.PORTRAIT -> accent
@@ -1093,7 +1305,7 @@ fun CameraScreen(
                 }
 
                 // Right: Flip Camera (Front/Rear)
-                IconButton(
+                SpringIconButton(
                     onClick = { viewModel.flipFrontBackCamera() },
                     enabled = !runtime.isRecording,
                     modifier = Modifier

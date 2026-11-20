@@ -148,10 +148,11 @@ fun CapabilityReportScreen(
                     val idStr = if (lens.physicalId != null) "ID ${lens.cameraId} (Physical ${lens.physicalId})" else "ID ${lens.cameraId}"
 
                     ReportCard("$facingName • ${lens.displayLabel} [$idStr]") {
-                        ReportLine("Hardware Level", lens.hardwareLevelLabel)
-                        ReportLine("Focal / Aperture", "${lens.focalLengthMm}mm  f/${lens.aperture}")
+                        ReportLine("Hardware Level", "${lens.hardwareLevelLabel}${if (lens.isLogicalMultiCamera) " • Multi-Cam" else ""}")
+                        ReportLine("Focal / 35mm Eq", "${lens.focalLengthMm}mm (${lens.equivalentFocalLengthMm}mm eq)  f/${lens.aperture}")
+                        ReportLine("Sensor Physical Size", "${String.format("%.2f", lens.sensorPhysicalWidthMm)} × ${String.format("%.2f", lens.sensorPhysicalHeightMm)} mm")
+                        ReportLine("Optical / Zoom Range", "Optic ${lens.opticalZoomRatio}x • ${lens.minZoom}x–${String.format("%.1fx", lens.maxZoom)}")
                         ReportLine("Sensor Orientation", "${lens.sensorOrientation}°")
-                        ReportLine("Zoom Range", "${lens.minZoom}x – ${String.format("%.1fx", lens.maxZoom)}")
                         ReportLine("Max Still Resolution", "${lens.maxPhotoWidth} × ${lens.maxPhotoHeight}")
                         ReportLine("Manual Sensor (ISO/SS)", if (lens.supportsManualSensor) "ISO ${lens.isoRange.first}–${lens.isoRange.last} • ${formatShutterSpeed(lens.exposureTimeRangeNs.first)}–${formatShutterSpeed(lens.exposureTimeRangeNs.last)}" else "Unsupported")
                         ReportLine("RAW (DNG)", if (lens.supportsRaw) "Supported" else "Unsupported")

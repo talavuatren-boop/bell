@@ -16,6 +16,7 @@ import android.media.MediaMuxer
 import android.net.Uri
 import com.example.model.AiProcessingMode
 import com.example.model.GyroSample
+import com.example.model.PhotoFilterPreset
 import com.example.model.VideoEditConfig
 import com.example.model.VideoMergeLayout
 import com.example.model.VideoResolutionPreset
@@ -370,30 +371,35 @@ class VideoProcessor(private val context: Context) {
     }
 
     private fun buildColorMatrix(config: VideoEditConfig): ColorMatrix? {
-        val hasEdits = abs(config.brightness) > 0.02f ||
+        val hasEdits = config.filter != PhotoFilterPreset.NATURAL ||
+            abs(config.brightness) > 0.02f ||
             abs(config.contrast - 1f) > 0.02f ||
             abs(config.saturation - 1f) > 0.02f ||
             abs(config.temperature) > 0.02f ||
             config.applyAiColor
         if (!hasEdits) return null
 
-        val cm = ColorMatrix()
+        val cm = ImageProcessor.buildFilterColorMatrix(config.filter)
         val sat = if (config.applyAiColor) (config.saturation * 1.12f).coerceIn(0f, 2f) else config.saturation
-        cm.setSaturation(sat)
+        if (abs(sat - 1f) > 0.02f) {
+            cm.postConcat(ColorMatrix().apply { setSaturation(sat) })
+        }
 
         val c = if (config.applyAiColor) (config.contrast * 1.06f) else config.contrast
         val b = config.brightness * 90f + (1f - c) * 128f
         val t = config.temperature * 24f
-        cm.postConcat(
-            ColorMatrix(
-                floatArrayOf(
-                    c, 0f, 0f, 0f, b + t,
-                    0f, c, 0f, 0f, b,
-                    0f, 0f, c, 0f, b - t,
-                    0f, 0f, 0f, 1f, 0f
+        if (abs(c - 1f) > 0.01f || abs(b) > 0.5f || abs(t) > 0.5f) {
+            cm.postConcat(
+                ColorMatrix(
+                    floatArrayOf(
+                        c, 0f, 0f, 0f, b + t,
+                        0f, c, 0f, 0f, b,
+                        0f, 0f, c, 0f, b - t,
+                        0f, 0f, 0f, 1f, 0f
+                    )
                 )
             )
-        )
+        }
         return cm
     }
 

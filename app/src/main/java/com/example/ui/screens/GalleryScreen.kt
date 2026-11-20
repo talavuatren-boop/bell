@@ -7,6 +7,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -36,15 +37,20 @@ import androidx.compose.material.icons.filled.MotionPhotosOn
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PlayCircleOutline
 import androidx.compose.material.icons.filled.RestoreFromTrash
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -60,6 +66,8 @@ import com.example.data.MediaAssetEntity
 import com.example.model.GalleryCategory
 import com.example.model.MediaItemType
 import com.example.ui.MainViewModel
+import com.example.ui.components.SpringIconButton
+import com.example.ui.components.springPressScale
 import com.example.ui.theme.CardSlate
 import com.example.ui.theme.CrimsonShutter
 import com.example.ui.theme.ElevatedObsidian
@@ -84,6 +92,7 @@ fun GalleryScreen(
     val category by viewModel.galleryCategory.collectAsStateWithLifecycle()
     val activeAssets by viewModel.activeAssets.collectAsStateWithLifecycle()
     val deletedAssets by viewModel.deletedAssets.collectAsStateWithLifecycle()
+    var pendingHardDeleteAsset by remember { mutableStateOf<MediaAssetEntity?>(null) }
 
     val pickerLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia()
@@ -134,7 +143,7 @@ fun GalleryScreen(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                IconButton(
+                SpringIconButton(
                     onClick = onOpenVideoMerge,
                     modifier = Modifier
                         .background(ElevatedObsidian, CircleShape)
@@ -147,7 +156,7 @@ fun GalleryScreen(
                         tint = PureWhite
                     )
                 }
-                IconButton(
+                SpringIconButton(
                     onClick = {
                         pickerLauncher.launch(
                             PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
@@ -177,12 +186,16 @@ fun GalleryScreen(
         ) {
             GalleryCategory.entries.forEach { cat ->
                 val selected = category == cat
+                val pillInteraction = remember(cat) { MutableInteractionSource() }
                 Box(
                     modifier = Modifier
+                        .springPressScale(pillInteraction, pressedScale = 0.91f)
                         .clip(RoundedCornerShape(16.dp))
                         .background(if (selected) accent else ElevatedObsidian)
                         .border(1.dp, if (selected) accent else HairlineBorder, RoundedCornerShape(16.dp))
-                        .clickable { viewModel.selectGalleryCategory(cat) }
+                        .clickable(interactionSource = pillInteraction, indication = null) {
+                            viewModel.selectGalleryCategory(cat)
+                        }
                         .padding(horizontal = 14.dp, vertical = 7.dp)
                         .testTag("gallery_cat_${cat.name.lowercase()}")
                 ) {
@@ -247,11 +260,52 @@ fun GalleryScreen(
                         isTrash = category == GalleryCategory.RECENTLY_DELETED,
                         onClick = { onOpenViewer(displayed, index) },
                         onRestore = { scope.launch { viewModel.mediaRepo.restoreFromTrash(item) } },
-                        onHardDelete = { scope.launch { viewModel.mediaRepo.permanentlyDelete(item) } }
+                        onHardDelete = { pendingHardDeleteAsset = item },
+                        modifier = Modifier.animateItem()
                     )
                 }
             }
         }
+    }
+
+    pendingHardDeleteAsset?.let { target ->
+        AlertDialog(
+            onDismissRequest = { pendingHardDeleteAsset = null },
+            containerColor = ElevatedObsidian,
+            titleContentColor = PureWhite,
+            textContentColor = MutedSlate,
+            title = { Text("Bạn có chắc muốn xóa vĩnh viễn?") },
+            text = { Text("Mục \"${target.displayName}\" sẽ bị xóa hoàn toàn và không thể khôi phục.") },
+            confirmButton = {
+                val confirmInteraction = remember { MutableInteractionSource() }
+                Button(
+                    onClick = {
+                        val toDelete = target
+                        pendingHardDeleteAsset = null
+                        scope.launch { viewModel.mediaRepo.permanentlyDelete(toDelete) }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = CrimsonShutter, contentColor = PureWhite),
+                    modifier = Modifier
+                        .springPressScale(confirmInteraction, pressedScale = 0.90f)
+                        .testTag("gallery_confirm_hard_delete_button"),
+                    interactionSource = confirmInteraction
+                ) {
+                    Text("Xóa vĩnh viễn")
+                }
+            },
+            dismissButton = {
+                val cancelInteraction = remember { MutableInteractionSource() }
+                TextButton(
+                    onClick = { pendingHardDeleteAsset = null },
+                    modifier = Modifier
+                        .springPressScale(cancelInteraction, pressedScale = 0.92f)
+                        .testTag("gallery_cancel_hard_delete_button"),
+                    interactionSource = cancelInteraction
+                ) {
+                    Text("Hủy", color = PureWhite)
+                }
+            }
+        )
     }
 }
 
@@ -261,15 +315,18 @@ private fun GalleryGridTile(
     isTrash: Boolean,
     onClick: () -> Unit,
     onRestore: () -> Unit,
-    onHardDelete: () -> Unit
+    onHardDelete: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     val accent = LocalAccentColor.current
+    val interactionSource = remember(asset.id) { MutableInteractionSource() }
     Box(
-        modifier = Modifier
+        modifier = modifier
             .aspectRatio(1f)
+            .springPressScale(interactionSource, pressedScale = 0.94f)
             .clip(RoundedCornerShape(8.dp))
             .background(CardSlate)
-            .clickable(onClick = onClick)
+            .clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
             .testTag("gallery_item_${asset.id}")
     ) {
         AsyncImage(
@@ -359,10 +416,10 @@ private fun GalleryGridTile(
                     .background(Color.Black.copy(alpha = 0.72f)),
                 horizontalArrangement = Arrangement.SpaceEvenly
             ) {
-                IconButton(onClick = onRestore, modifier = Modifier.size(34.dp)) {
+                SpringIconButton(onClick = onRestore, modifier = Modifier.size(36.dp)) {
                     Icon(Icons.Default.RestoreFromTrash, contentDescription = "Restore", tint = accent, modifier = Modifier.size(18.dp))
                 }
-                IconButton(onClick = onHardDelete, modifier = Modifier.size(34.dp)) {
+                SpringIconButton(onClick = onHardDelete, modifier = Modifier.size(36.dp)) {
                     Icon(Icons.Default.DeleteOutline, contentDescription = "Delete Permanently", tint = CrimsonShutter, modifier = Modifier.size(18.dp))
                 }
             }

@@ -529,6 +529,25 @@ object ImageProcessor {
         return Bitmap.createBitmap(pixels, w, h, Bitmap.Config.ARGB_8888)
     }
 
+    fun buildFilterColorMatrix(preset: PhotoFilterPreset): ColorMatrix {
+        return ColorMatrix().also { applyFilterPreset(it, preset) }
+    }
+
+    fun applyFilterToBitmap(source: Bitmap, preset: PhotoFilterPreset): Bitmap {
+        if (preset == PhotoFilterPreset.NATURAL) return source
+        val cm = buildFilterColorMatrix(preset)
+        val out = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
+        Canvas(out).drawBitmap(
+            source,
+            0f,
+            0f,
+            Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+                colorFilter = ColorMatrixColorFilter(cm)
+            }
+        )
+        return out
+    }
+
     private fun applyFilterPreset(cm: ColorMatrix, preset: PhotoFilterPreset) {
         when (preset) {
             PhotoFilterPreset.NATURAL -> Unit
@@ -605,7 +624,6 @@ object ImageProcessor {
             return ensureMutableBitmap(source)
         }
 
-        // Work at capped processing size if needed while preserving high quality
         val scaleDown = 6
         val bw = (w / scaleDown).coerceAtLeast(16)
         val bh = (h / scaleDown).coerceAtLeast(16)
@@ -616,13 +634,11 @@ object ImageProcessor {
         val blurredFull = Bitmap.createScaledBitmap(blurredSmall, w, h, true)
         if (blurredFull !== blurredSmall) blurredSmall.recycle()
 
-        val srcPixels = IntArray(w * h)
-        val blurPixels = IntArray(w * h)
-        source.getPixels(srcPixels, 0, w, 0, 0, w, h)
-        blurredFull.getPixels(blurPixels, 0, w, 0, 0, w, h)
-        blurredFull.recycle()
+        val outBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val srcRow = IntArray(w)
+        val blurRow = IntArray(w)
+        val outRow = IntArray(w)
 
-        val out = IntArray(w * h)
         val cx = focusNormX.coerceIn(0.15f, 0.85f) * w
         val cy = focusNormY.coerceIn(0.15f, 0.85f) * h
         // Slightly taller vertical ellipse for natural head-and-shoulders framing
@@ -631,43 +647,48 @@ object ImageProcessor {
         val innerEdge = 0.58f
         val outerEdge = 1.48f
         val warmthGain = 0.04f * strength
+        val maxStrengthFactor = 0.35f + 0.65f * strength
 
-        for (y in 0 until h) {
-            val dy = (y - cy) / ry
-            val dy2 = dy * dy
-            val rowOff = y * w
-            for (x in 0 until w) {
-                val dx = (x - cx) / rx
-                val dist = sqrt(dx * dx + dy2)
-                val tRaw = ((dist - innerEdge) / (outerEdge - innerEdge)).coerceIn(0f, 1f)
-                // Smoothstep falloff multiplied by aperture bokeh strength
-                val blurBlend = (tRaw * tRaw * (3f - 2f * tRaw)) * (0.35f + 0.65f * strength)
+        try {
+            for (y in 0 until h) {
+                source.getPixels(srcRow, 0, w, 0, y, w, 1)
+                blurredFull.getPixels(blurRow, 0, w, 0, y, w, 1)
 
-                val idx = rowOff + x
-                val sp = srcPixels[idx]
-                val bp = blurPixels[idx]
+                val dy = (y - cy) / ry
+                val dy2 = dy * dy
+                for (x in 0 until w) {
+                    val dx = (x - cx) / rx
+                    val dist = sqrt(dx * dx + dy2)
+                    val tRaw = ((dist - innerEdge) / (outerEdge - innerEdge)).coerceIn(0f, 1f)
+                    val blurBlend = (tRaw * tRaw * (3f - 2f * tRaw)) * maxStrengthFactor
 
-                val sr = (sp shr 16) and 0xFF
-                val sg = (sp shr 8) and 0xFF
-                val sb = sp and 0xFF
+                    val sp = srcRow[x]
+                    val bp = blurRow[x]
 
-                val br = (bp shr 16) and 0xFF
-                val bg = (bp shr 8) and 0xFF
-                val bb = bp and 0xFF
+                    val sr = (sp shr 16) and 0xFF
+                    val sg = (sp shr 8) and 0xFF
+                    val sb = sp and 0xFF
 
-                val inv = 1f - blurBlend
-                // Gentle subject micro-glow + background depth softening
-                val rMix = (sr * inv + br * blurBlend) * (1f + warmthGain * inv)
-                val gMix = (sg * inv + bg * blurBlend) * (1f + warmthGain * 0.45f * inv)
-                val bMix = (sb * inv + bb * blurBlend) * (1f - warmthGain * 0.35f * inv)
+                    val br = (bp shr 16) and 0xFF
+                    val bg = (bp shr 8) and 0xFF
+                    val bb = bp and 0xFF
 
-                val nr = rMix.roundToInt().coerceIn(0, 255)
-                val ng = gMix.roundToInt().coerceIn(0, 255)
-                val nb = bMix.roundToInt().coerceIn(0, 255)
-                out[idx] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
+                    val inv = 1f - blurBlend
+                    val rMix = (sr * inv + br * blurBlend) * (1f + warmthGain * inv)
+                    val gMix = (sg * inv + bg * blurBlend) * (1f + warmthGain * 0.45f * inv)
+                    val bMix = (sb * inv + bb * blurBlend) * (1f - warmthGain * 0.35f * inv)
+
+                    val nr = rMix.roundToInt().coerceIn(0, 255)
+                    val ng = gMix.roundToInt().coerceIn(0, 255)
+                    val nb = bMix.roundToInt().coerceIn(0, 255)
+                    outRow[x] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
+                }
+                outBitmap.setPixels(outRow, 0, w, 0, y, w, 1)
             }
+        } finally {
+            blurredFull.recycle()
         }
-        return Bitmap.createBitmap(out, w, h, Bitmap.Config.ARGB_8888)
+        return outBitmap
     }
 
     private fun fastSeparableBoxBlur(src: Bitmap, radius: Int, passes: Int): Bitmap {

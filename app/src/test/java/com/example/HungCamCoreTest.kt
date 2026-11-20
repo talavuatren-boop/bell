@@ -266,4 +266,80 @@ class HungCamCoreTest {
         val cornerR = (cornerPx shr 16) and 0xFF
         assertTrue("Expected corner blur averaging (25..230), got $cornerR", cornerR in 25..230)
     }
+
+    @Test
+    fun `hardware detector computes 35mm equivalent focal length and 2x optical zoom stops`() {
+        // 1/1.4" main sensor ~9.8x7.3mm with 6.1mm lens -> ~21-24mm eq
+        val mainEq = HardwareCapabilityDetector.compute35mmEquivalentFocalMm(
+            focalMm = 6.1f,
+            sensorWidthMm = 9.8f,
+            sensorHeightMm = 7.35f
+        )
+        assertTrue("Expected ~21..24mm 35mm eq, got $mainEq", mainEq in 20..25)
+
+        val mainLogical = com.example.model.CameraLensInfo(
+            cameraId = "0",
+            physicalId = null,
+            lensFacing = CameraCharacteristics.LENS_FACING_BACK,
+            displayLabel = "1x",
+            focalLengthMm = 6.1f,
+            aperture = 1.65f,
+            sensorOrientation = 90,
+            hardwareLevelLabel = "LEVEL_3",
+            hasFlash = true,
+            supportsManualSensor = true,
+            supportsRaw = true,
+            supportsHeic = true,
+            supportsOis = true,
+            supportsEis = true,
+            supportsHdrScene = true,
+            minZoom = 0.6f,
+            maxZoom = 10.0f,
+            isoRange = 50..6400,
+            exposureTimeRangeNs = 100_000L..30_000_000_000L,
+            evRange = -12..12,
+            evStep = 0.25f,
+            minFocusDistance = 10f,
+            maxPhotoWidth = 4080,
+            maxPhotoHeight = 3060,
+            standardPhotoWidth = 4080,
+            standardPhotoHeight = 3060,
+            supportedVideoProfiles = emptyList(),
+            supportedSlowMoModes = emptyList(),
+            sensorPhysicalWidthMm = 9.8f,
+            sensorPhysicalHeightMm = 7.35f,
+            equivalentFocalLengthMm = 23,
+            opticalZoomRatio = 1.0f,
+            isLogicalMultiCamera = true
+        )
+
+        val stops = HardwareCapabilityDetector.buildZoomStopPresets(listOf(mainLogical), mainLogical)
+        val labels = stops.map { it.label }
+        assertTrue("Expected 0.6x stop in $labels", "0.6x" in labels)
+        assertTrue("Expected 1x stop in $labels", "1x" in labels)
+        assertTrue("Expected 2x stop in $labels", "2x" in labels)
+        val twoX = stops.first { it.label == "2x" }
+        assertEquals(2.0f, twoX.targetZoomRatio, 0.01f)
+        assertEquals(46, twoX.equivalentFocalMm)
+    }
+
+    @Test
+    fun `camera live filter helper transforms bitmap for bw and warm presets`() {
+        val src = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(android.graphics.Color.rgb(200, 120, 60))
+        }
+
+        val bw = ImageProcessor.applyFilterToBitmap(src, PhotoFilterPreset.BW)
+        val bwPx = bw.getPixel(8, 8)
+        val bwR = (bwPx shr 16) and 0xFF
+        val bwG = (bwPx shr 8) and 0xFF
+        val bwB = bwPx and 0xFF
+        assertTrue("Expected B&W channels equalized, got R=$bwR G=$bwG B=$bwB", kotlin.math.abs(bwR - bwG) <= 2 && kotlin.math.abs(bwG - bwB) <= 2)
+
+        val warm = ImageProcessor.applyFilterToBitmap(src, PhotoFilterPreset.WARM)
+        val warmPx = warm.getPixel(8, 8)
+        val warmR = (warmPx shr 16) and 0xFF
+        val warmB = warmPx and 0xFF
+        assertTrue("Expected WARM filter red > blue, got R=$warmR B=$warmB", warmR > warmB)
+    }
 }

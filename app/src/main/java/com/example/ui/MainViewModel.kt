@@ -34,6 +34,7 @@ import com.example.model.GridType
 import com.example.model.LivePhotoDuration
 import com.example.model.LiveTelemetryState
 import com.example.model.MediaItemType
+import com.example.model.PhotoFilterPreset
 import com.example.model.ProCameraParameters
 import com.example.model.ProCaptureType
 import com.example.model.SelfTimerDuration
@@ -137,6 +138,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _slowMoOption = MutableStateFlow<SlowMoOption?>(null)
     val slowMoOption: StateFlow<SlowMoOption?> = _slowMoOption.asStateFlow()
 
+    private val _cameraFilter = MutableStateFlow(PhotoFilterPreset.NATURAL)
+    val cameraFilter: StateFlow<PhotoFilterPreset> = _cameraFilter.asStateFlow()
+
     private val _galleryCategory = MutableStateFlow(GalleryCategory.ALL)
     val galleryCategory: StateFlow<GalleryCategory> = _galleryCategory.asStateFlow()
 
@@ -233,6 +237,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
         performHapticTick()
         syncSession()
+    }
+
+    fun selectZoomStop(stop: com.example.model.ZoomStopPreset) {
+        val active = _activeLens.value
+        val sameLens = active != null &&
+            active.cameraId == stop.backingLens.cameraId &&
+            active.physicalId == stop.backingLens.physicalId
+        if (sameLens) {
+            cameraEngine.smoothZoomTo(stop.targetZoomRatio)
+            performHapticTick()
+        } else {
+            if (cameraRuntime.value.isRecording) {
+                // Mid-recording: smoothly zoom on active camera stream without interrupting recording
+                cameraEngine.smoothZoomTo(stop.targetZoomRatio)
+                performHapticTick()
+            } else {
+                selectLens(stop.backingLens)
+                if (kotlin.math.abs(stop.targetZoomRatio - 1.0f) > 0.02f) {
+                    cameraEngine.setZoomRatio(stop.targetZoomRatio)
+                }
+            }
+        }
     }
 
     fun flipFrontBackCamera() {
@@ -343,6 +369,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _slowMoOption.value = option
         performHapticTick()
         syncSession()
+    }
+
+    fun setCameraFilter(filter: PhotoFilterPreset) {
+        _cameraFilter.value = filter
+        cameraEngine.updateCameraFilter(filter)
+        performHapticTick()
     }
 
     fun triggerShutterAction() {
