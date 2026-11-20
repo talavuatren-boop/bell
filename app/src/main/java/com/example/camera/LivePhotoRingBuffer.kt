@@ -238,7 +238,8 @@ class LivePhotoRingBuffer(
     suspend fun captureClipAroundShutter(
         durationSeconds: Int,
         shutterMonotonicUs: Long,
-        outputFile: File
+        outputFile: File,
+        orientationHint: Int = 90
     ): Result<LiveClipResult> {
         if (!running.get() || videoFormat == null) {
             return Result.failure(IllegalStateException("Live Photo ring buffer is not active"))
@@ -297,6 +298,7 @@ class LivePhotoRingBuffer(
             }
             val aTrack = if (aFmt != null && selectedAudio.isNotEmpty()) muxer.addTrack(aFmt) else -1
 
+            muxer.setOrientationHint(((orientationHint % 360) + 360) % 360)
             muxer.start()
             val info = MediaCodec.BufferInfo()
             var lastWrittenV = -1L

@@ -719,7 +719,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 inSampleSize = sample
                 inPreferredConfig = Bitmap.Config.ARGB_8888
             }
-            cr.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, decOpts) }
+            val bmp = cr.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, decOpts) }
+                ?: return@runCatching null
+            val exifOrient = cr.openInputStream(uri)?.use {
+                android.media.ExifInterface(it).getAttributeInt(
+                    android.media.ExifInterface.TAG_ORIENTATION,
+                    android.media.ExifInterface.ORIENTATION_NORMAL
+                )
+            } ?: android.media.ExifInterface.ORIENTATION_NORMAL
+            val matrix = android.graphics.Matrix().apply {
+                when (exifOrient) {
+                    android.media.ExifInterface.ORIENTATION_ROTATE_90 -> postRotate(90f)
+                    android.media.ExifInterface.ORIENTATION_ROTATE_180 -> postRotate(180f)
+                    android.media.ExifInterface.ORIENTATION_ROTATE_270 -> postRotate(270f)
+                    android.media.ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> postScale(-1f, 1f)
+                    android.media.ExifInterface.ORIENTATION_FLIP_VERTICAL -> postScale(1f, -1f)
+                    android.media.ExifInterface.ORIENTATION_TRANSPOSE -> { postRotate(90f); postScale(-1f, 1f) }
+                    android.media.ExifInterface.ORIENTATION_TRANSVERSE -> { postRotate(270f); postScale(-1f, 1f) }
+                }
+            }
+            if (!matrix.isIdentity) {
+                Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true).also {
+                    if (it !== bmp) bmp.recycle()
+                }
+            } else {
+                bmp
+            }
         }.getOrNull()
     }
 

@@ -15,6 +15,7 @@ import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -227,63 +228,88 @@ fun CameraScreen(
             return@Box
         }
 
-        // Viewfinder container respecting aspect ratio (4:3, 16:9, 1:1, Full-Screen)
-        val viewfinderMod = when (settings.aspectRatio) {
-            AspectRatioMode.RATIO_1_1 -> Modifier.fillMaxWidth().aspectRatio(1f).align(Alignment.Center)
-            AspectRatioMode.RATIO_4_3 -> Modifier.fillMaxWidth().aspectRatio(3f / 4f).align(Alignment.Center)
-            AspectRatioMode.RATIO_16_9 -> Modifier.fillMaxWidth().aspectRatio(9f / 16f).align(Alignment.Center)
-            AspectRatioMode.FULL_SCREEN -> Modifier.fillMaxSize()
+        // Viewfinder container respecting orientation, video mode 16:9, and aspect ratio (4:3, 16:9, 1:1, Full-Screen)
+        val effectiveAspect = if (
+            mode == CameraMode.VIDEO ||
+            mode == CameraMode.SLOW_MOTION ||
+            mode == CameraMode.TIMELAPSE
+        ) {
+            AspectRatioMode.RATIO_16_9
+        } else {
+            settings.aspectRatio
         }
 
-        Box(
-            modifier = viewfinderMod
-                .clip(RoundedCornerShape(if (settings.aspectRatio == AspectRatioMode.FULL_SCREEN) 0.dp else 12.dp))
-                .pointerInput(activeLens) {
-                    detectTransformGestures { _, _, zoomChange, _ ->
-                        if (zoomChange != 1f) {
-                            viewModel.cameraEngine.setZoomRatio(runtime.activeZoom * zoomChange)
+        BoxWithConstraints(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
+        ) {
+            val isLandscape = maxWidth > maxHeight
+            val boxRatio = (maxWidth / maxHeight).coerceAtLeast(0.1f)
+            val targetAspect = when (effectiveAspect) {
+                AspectRatioMode.RATIO_1_1 -> 1f
+                AspectRatioMode.RATIO_4_3 -> if (isLandscape) 4f / 3f else 3f / 4f
+                AspectRatioMode.RATIO_16_9 -> if (isLandscape) 16f / 9f else 9f / 16f
+                AspectRatioMode.FULL_SCREEN -> null
+            }
+            val viewfinderMod = when {
+                targetAspect == null -> Modifier.fillMaxSize()
+                targetAspect > boxRatio -> Modifier.fillMaxWidth().aspectRatio(targetAspect)
+                else -> Modifier.fillMaxHeight().aspectRatio(targetAspect)
+            }
+
+            Box(
+                modifier = viewfinderMod
+                    .clip(RoundedCornerShape(if (effectiveAspect == AspectRatioMode.FULL_SCREEN) 0.dp else 12.dp))
+                    .pointerInput(activeLens) {
+                        detectTransformGestures { _, _, zoomChange, _ ->
+                            if (zoomChange != 1f) {
+                                viewModel.cameraEngine.setZoomRatio(runtime.activeZoom * zoomChange)
+                            }
                         }
                     }
-                }
-                .pointerInput(Unit) {
-                    detectTapGestures { offset ->
-                        val nx = (offset.x / size.width.toFloat()).coerceIn(0f, 1f)
-                        val ny = (offset.y / size.height.toFloat()).coerceIn(0f, 1f)
-                        focusPoint = Offset(nx, ny)
-                        viewModel.cameraEngine.triggerTapToFocus(nx, ny)
-                        viewModel.performHapticTick()
+                    .pointerInput(Unit) {
+                        detectTapGestures { offset ->
+                            val nx = (offset.x / size.width.toFloat()).coerceIn(0f, 1f)
+                            val ny = (offset.y / size.height.toFloat()).coerceIn(0f, 1f)
+                            focusPoint = Offset(nx, ny)
+                            viewModel.cameraEngine.triggerTapToFocus(nx, ny)
+                            viewModel.performHapticTick()
+                        }
                     }
-                }
-        ) {
-            AndroidView(
-                factory = { ctx ->
-                    TextureView(ctx).also { tv ->
-                        val rot = ctx.display?.rotation?.let { it * 90 } ?: 0
-                        viewModel.cameraEngine.attachTextureView(tv, rot)
-                    }
-                },
-                update = { tv ->
-                    val rot = tv.context.display?.rotation?.let { it * 90 } ?: 0
-                    viewModel.cameraEngine.updateDisplayRotation(rot)
-                },
-                modifier = Modifier.fillMaxSize()
-            )
+            ) {
+                AndroidView(
+                    factory = { ctx ->
+                        TextureView(ctx).also { tv ->
+                            tv.addOnLayoutChangeListener { v, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
+                                if ((right - left) != (oldRight - oldLeft) || (bottom - top) != (oldBottom - oldTop)) {
+                                    viewModel.cameraEngine.refreshTextureTransform()
+                                }
+                            }
+                            viewModel.cameraEngine.attachTextureView(tv, getDisplayRotationDegrees(ctx))
+                        }
+                    },
+                    update = { tv ->
+                        viewModel.cameraEngine.updateDisplayRotation(getDisplayRotationDegrees(tv.context))
+                    },
+                    modifier = Modifier.fillMaxSize()
+                )
 
-            if (mode == CameraMode.PRO && proParams.focusPeakingEnabled) {
-                FocusPeakingOverlay(data = focusPeaking)
-            }
-            GridOverlay(gridType = settings.gridType)
-            if (settings.electronicLevelEnabled) {
-                ElectronicLevelOverlay(
-                    rollDegrees = telemetry.rollDegrees,
-                    isAligned = telemetry.isLevelAligned
+                if (mode == CameraMode.PRO && proParams.focusPeakingEnabled) {
+                    FocusPeakingOverlay(data = focusPeaking)
+                }
+                GridOverlay(gridType = settings.gridType)
+                if (settings.electronicLevelEnabled) {
+                    ElectronicLevelOverlay(
+                        rollDegrees = telemetry.rollDegrees,
+                        isAligned = telemetry.isLevelAligned
+                    )
+                }
+                TapFocusReticle(normalizedPos = focusPoint, visible = showFocusReticle)
+                SelfTimerCountdownHud(
+                    secondsRemaining = countdown,
+                    modifier = Modifier.align(Alignment.Center)
                 )
             }
-            TapFocusReticle(normalizedPos = focusPoint, visible = showFocusReticle)
-            SelfTimerCountdownHud(
-                secondsRemaining = countdown,
-                modifier = Modifier.align(Alignment.Center)
-            )
         }
 
         // Top Scrim for high legibility over bright viewfinders
@@ -458,11 +484,14 @@ fun CameraScreen(
                     }
                 }
 
-                // Aspect Ratio
+                // Aspect Ratio (locked to 16:9 in video modes to match hardware recording stream)
+                val isVideoFamilyMode = mode == CameraMode.VIDEO ||
+                    mode == CameraMode.SLOW_MOTION ||
+                    mode == CameraMode.TIMELAPSE
                 Row(
                     modifier = Modifier
                         .clip(RoundedCornerShape(16.dp))
-                        .clickable { viewModel.cycleAspectRatio() }
+                        .clickable(enabled = !isVideoFamilyMode) { viewModel.cycleAspectRatio() }
                         .padding(horizontal = 8.dp, vertical = 6.dp)
                         .testTag("camera_aspect_button"),
                     verticalAlignment = Alignment.CenterVertically,
@@ -470,11 +499,15 @@ fun CameraScreen(
                 ) {
                     Icon(
                         imageVector = Icons.Default.AspectRatio,
-                        contentDescription = "Aspect ${settings.aspectRatio.label}",
-                        tint = PureWhite,
+                        contentDescription = if (isVideoFamilyMode) "Aspect 16:9" else "Aspect ${settings.aspectRatio.label}",
+                        tint = if (isVideoFamilyMode) MutedSlate else PureWhite,
                         modifier = Modifier.size(17.dp)
                     )
-                    Text(settings.aspectRatio.label, style = MonoTelemetrySmall, color = PureWhite)
+                    Text(
+                        text = if (isVideoFamilyMode) "16:9" else settings.aspectRatio.label,
+                        style = MonoTelemetrySmall,
+                        color = if (isVideoFamilyMode) MutedSlate else PureWhite
+                    )
                 }
 
                 // Grid & Level toggles
@@ -954,5 +987,27 @@ private fun VideoQuickSpecStrip(
                 .padding(horizontal = 8.dp, vertical = 4.dp)
                 .testTag("video_stab_toggle")
         )
+    }
+}
+
+private tailrec fun android.content.Context.findActivity(): android.app.Activity? = when (this) {
+    is android.app.Activity -> this
+    is android.content.ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
+private fun getDisplayRotationDegrees(context: android.content.Context): Int {
+    val hostContext = context.findActivity() ?: context
+    val rotation = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+        runCatching { hostContext.display?.rotation }.getOrNull() ?: android.view.Surface.ROTATION_0
+    } else {
+        @Suppress("DEPRECATION")
+        (hostContext.getSystemService(android.content.Context.WINDOW_SERVICE) as android.view.WindowManager).defaultDisplay.rotation
+    }
+    return when (rotation) {
+        android.view.Surface.ROTATION_90 -> 90
+        android.view.Surface.ROTATION_180 -> 180
+        android.view.Surface.ROTATION_270 -> 270
+        else -> 0
     }
 }

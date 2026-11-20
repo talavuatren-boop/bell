@@ -137,6 +137,31 @@ class MediaStoreRepository(
                 throw t
             }
 
+            var displayW = width
+            var displayH = height
+            if (!isRawDng) {
+                runCatching {
+                    val opts = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+                    val bw = opts.outWidth
+                    val bh = opts.outHeight
+                    if (bw > 0 && bh > 0) {
+                        val orient = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                            ExifInterface(java.io.ByteArrayInputStream(bytes))
+                                .getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+                        } else {
+                            ExifInterface.ORIENTATION_NORMAL
+                        }
+                        val swap = orient == ExifInterface.ORIENTATION_ROTATE_90 ||
+                            orient == ExifInterface.ORIENTATION_ROTATE_270 ||
+                            orient == ExifInterface.ORIENTATION_TRANSPOSE ||
+                            orient == ExifInterface.ORIENTATION_TRANSVERSE
+                        displayW = if (swap) bh else bw
+                        displayH = if (swap) bw else bh
+                    }
+                }
+            }
+
             val mediaType = when {
                 isRawDng -> MediaItemType.RAW_DNG
                 livePairId != null && liveVideoUri != null -> MediaItemType.LIVE_PHOTO
@@ -147,8 +172,8 @@ class MediaStoreRepository(
                 mediaStoreUri = uri.toString(),
                 mediaType = mediaType.name,
                 displayName = displayName,
-                width = width,
-                height = height,
+                width = displayW,
+                height = displayH,
                 fileSizeBytes = bytes.size.toLong(),
                 captureDateMs = System.currentTimeMillis(),
                 livePairId = livePairId,
@@ -366,9 +391,10 @@ class MediaStoreRepository(
             retriever.setDataSource(context, uri)
             val w = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
             val h = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+            val rot = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
             val d = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
             retriever.release()
-            Triple(w, h, d)
+            if (rot == 90 || rot == 270) Triple(h, w, d) else Triple(w, h, d)
         }.getOrDefault(Triple(0, 0, 0L))
     }
 

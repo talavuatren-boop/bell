@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
 import android.net.Uri
 import android.view.Surface
@@ -11,16 +12,21 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
@@ -77,7 +83,9 @@ import com.example.ui.theme.MonoTelemetrySmall
 import com.example.ui.theme.MutedSlate
 import com.example.ui.theme.PureBlack
 import com.example.ui.theme.PureWhite
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -371,6 +379,16 @@ private fun LivePhotoViewerPane(
     val accent = LocalAccentColor.current
     var isPlayingLive by remember { mutableStateOf(false) }
     var player by remember { mutableStateOf<MediaPlayer?>(null) }
+    var videoAspect by remember(asset.id) {
+        val fallback = if (asset.width > 0 && asset.height > 0) asset.width.toFloat() / asset.height.toFloat() else 3f / 4f
+        mutableFloatStateOf(fallback)
+    }
+
+    LaunchedEffect(asset.liveVideoUri) {
+        val vUri = asset.liveVideoUri?.let { Uri.parse(it) } ?: return@LaunchedEffect
+        val ratio = withContext(Dispatchers.IO) { readVideoDisplayAspect(context, vUri) }
+        if (ratio != null && ratio > 0f) videoAspect = ratio
+    }
 
     DisposableEffect(asset.liveVideoUri) {
         onDispose {
@@ -408,34 +426,54 @@ private fun LivePhotoViewerPane(
         contentAlignment = Alignment.Center
     ) {
         if (isPlayingLive && !asset.liveVideoUri.isNullOrBlank()) {
-            AndroidView(
-                factory = { ctx ->
-                    TextureView(ctx).apply {
-                        surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-                            override fun onSurfaceTextureAvailable(st: android.graphics.SurfaceTexture, w: Int, h: Int) {
-                                val mp = MediaPlayer().apply {
-                                    setDataSource(ctx, Uri.parse(asset.liveVideoUri))
-                                    setSurface(Surface(st))
-                                    isLooping = true
-                                    val vol = if (audioEnabled) 1f else 0f
-                                    setVolume(vol, vol)
-                                    setOnPreparedListener { it.start() }
-                                    prepareAsync()
+            val stillAspect = if (asset.width > 0 && asset.height > 0) {
+                asset.width.toFloat() / asset.height.toFloat()
+            } else {
+                videoAspect
+            }
+            BoxWithConstraints(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                val outerRatio = (maxWidth / maxHeight).coerceAtLeast(0.1f)
+                val frameW = if (stillAspect > outerRatio) maxWidth else maxHeight * stillAspect
+                val frameH = if (stillAspect > outerRatio) maxWidth / stillAspect else maxHeight
+                val coverW = if (videoAspect > stillAspect) frameH * videoAspect else frameW
+                val coverH = if (videoAspect > stillAspect) frameH else frameW / videoAspect
+
+                Box(
+                    modifier = Modifier
+                        .requiredSize(frameW, frameH)
+                        .clipToBounds(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    AndroidView(
+                        factory = { ctx ->
+                            TextureView(ctx).apply {
+                                surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                                    override fun onSurfaceTextureAvailable(st: android.graphics.SurfaceTexture, w: Int, h: Int) {
+                                        val mp = MediaPlayer().apply {
+                                            setDataSource(ctx, Uri.parse(asset.liveVideoUri))
+                                            setSurface(Surface(st))
+                                            isLooping = true
+                                            val vol = if (audioEnabled) 1f else 0f
+                                            setVolume(vol, vol)
+                                            setOnPreparedListener { it.start() }
+                                            prepareAsync()
+                                        }
+                                        player = mp
+                                    }
+                                    override fun onSurfaceTextureSizeChanged(st: android.graphics.SurfaceTexture, w: Int, h: Int) = Unit
+                                    override fun onSurfaceTextureDestroyed(st: android.graphics.SurfaceTexture): Boolean {
+                                        runCatching { player?.release() }
+                                        player = null
+                                        return true
+                                    }
+                                    override fun onSurfaceTextureUpdated(st: android.graphics.SurfaceTexture) = Unit
                                 }
-                                player = mp
                             }
-                            override fun onSurfaceTextureSizeChanged(st: android.graphics.SurfaceTexture, w: Int, h: Int) = Unit
-                            override fun onSurfaceTextureDestroyed(st: android.graphics.SurfaceTexture): Boolean {
-                                runCatching { player?.release() }
-                                player = null
-                                return true
-                            }
-                            override fun onSurfaceTextureUpdated(st: android.graphics.SurfaceTexture) = Unit
-                        }
-                    }
-                },
-                modifier = Modifier.fillMaxSize()
-            )
+                        },
+                        modifier = Modifier.requiredSize(coverW, coverH)
+                    )
+                }
+            }
         } else {
             AsyncImage(
                 model = asset.mediaStoreUri,
@@ -472,8 +510,15 @@ private fun VideoPlayerPane(
     audioEnabled: Boolean,
     isCurrentPage: Boolean
 ) {
+    val context = LocalContext.current
     var isPlaying by remember { mutableStateOf(true) }
     var mediaPlayer by remember { mutableStateOf<MediaPlayer?>(null) }
+    var videoAspect by remember(uri) { mutableFloatStateOf(9f / 16f) }
+
+    LaunchedEffect(uri) {
+        val ratio = withContext(Dispatchers.IO) { readVideoDisplayAspect(context, uri) }
+        if (ratio != null && ratio > 0f) videoAspect = ratio
+    }
 
     LaunchedEffect(isCurrentPage, mediaPlayer) {
         if (!isCurrentPage) {
@@ -494,7 +539,13 @@ private fun VideoPlayerPane(
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+    BoxWithConstraints(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        val boxRatio = maxWidth / maxHeight
+        val fitMod = if (videoAspect > boxRatio) {
+            Modifier.fillMaxWidth().aspectRatio(videoAspect)
+        } else {
+            Modifier.fillMaxHeight().aspectRatio(videoAspect)
+        }
         AndroidView(
             factory = { ctx ->
                 TextureView(ctx).apply {
@@ -526,7 +577,7 @@ private fun VideoPlayerPane(
                     }
                 }
             },
-            modifier = Modifier.fillMaxSize()
+            modifier = fitMod
         )
 
         IconButton(
@@ -554,4 +605,17 @@ private fun VideoPlayerPane(
             )
         }
     }
+}
+
+private fun readVideoDisplayAspect(context: android.content.Context, uri: Uri): Float? {
+    return runCatching {
+        val r = MediaMetadataRetriever()
+        r.setDataSource(context, uri)
+        val w = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+        val h = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+        val rot = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+        r.release()
+        if (w <= 0 || h <= 0) return null
+        if (rot == 90 || rot == 270) h.toFloat() / w.toFloat() else w.toFloat() / h.toFloat()
+    }.getOrNull()
 }

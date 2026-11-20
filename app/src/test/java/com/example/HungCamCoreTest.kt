@@ -2,8 +2,10 @@ package com.example
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.hardware.camera2.CameraCharacteristics
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.example.camera.CameraEngine
 import com.example.camera.HardwareCapabilityDetector
 import com.example.data.HungCamDatabase
 import com.example.data.MediaAssetEntity
@@ -155,5 +157,33 @@ class HungCamCoreTest {
         val centerPx = edited.getPixel(200, 200)
         assertTrue(centerPx != baseColor)
         assertEquals(3, VideoMergeLayout.entries.size)
+    }
+
+    @Test
+    fun `camera orientation computes upright portrait 90 back and 270 front`() {
+        // Portrait ROTATION_0 (0 deg)
+        assertEquals(90, CameraEngine.computeJpegOrientation(90, CameraCharacteristics.LENS_FACING_BACK, 0))
+        assertEquals(270, CameraEngine.computeJpegOrientation(270, CameraCharacteristics.LENS_FACING_FRONT, 0))
+        // Landscape ROTATION_90 (90 deg)
+        assertEquals(0, CameraEngine.computeJpegOrientation(90, CameraCharacteristics.LENS_FACING_BACK, 90))
+        assertEquals(0, CameraEngine.computeJpegOrientation(270, CameraCharacteristics.LENS_FACING_FRONT, 90))
+        // Reverse Portrait ROTATION_180 (180 deg)
+        assertEquals(270, CameraEngine.computeJpegOrientation(90, CameraCharacteristics.LENS_FACING_BACK, 180))
+        assertEquals(90, CameraEngine.computeJpegOrientation(270, CameraCharacteristics.LENS_FACING_FRONT, 180))
+        // Reverse Landscape ROTATION_270 (270 deg)
+        assertEquals(180, CameraEngine.computeJpegOrientation(90, CameraCharacteristics.LENS_FACING_BACK, 270))
+        assertEquals(180, CameraEngine.computeJpegOrientation(270, CameraCharacteristics.LENS_FACING_FRONT, 270))
+    }
+
+    @Test
+    fun `camera still aspect crop enforces exact 1_1 and 9_16 without stretching`() {
+        val portrait43 = Bitmap.createBitmap(300, 400, Bitmap.Config.ARGB_8888)
+        val square = CameraEngine.centerCropBitmapToAspect(portrait43, 1f)
+        assertEquals(300, square.width)
+        assertEquals(300, square.height)
+
+        val portrait169 = CameraEngine.centerCropBitmapToAspect(portrait43, 9f / 16f)
+        assertEquals(225, portrait169.width)
+        assertEquals(400, portrait169.height)
     }
 }

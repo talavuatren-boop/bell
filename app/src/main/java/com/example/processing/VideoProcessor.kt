@@ -65,13 +65,16 @@ class VideoProcessor(private val context: Context) {
         val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 3000L
         val srcW = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 1280
         val srcH = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 720
+        val srcRot = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+        val displayW = if (srcRot == 90 || srcRot == 270) srcH else srcW
+        val displayH = if (srcRot == 90 || srcRot == 270) srcW else srcH
 
         val trimStart = config.trimStartMs.coerceIn(0L, durationMs)
         val trimEnd = if (config.trimEndMs in (trimStart + 200L)..durationMs) config.trimEndMs else durationMs
         val effectiveDurMs = (trimEnd - trimStart).coerceAtLeast(300L)
 
         // Preserve orientation aspect
-        val portrait = srcH > srcW
+        val portrait = displayH > displayW
         val rawW = config.targetResolution.width
         val rawH = config.targetResolution.height
         val targetW = ((if (portrait) min(rawW, rawH) else max(rawW, rawH)) / 16) * 16
@@ -164,10 +167,14 @@ class VideoProcessor(private val context: Context) {
 
                 val rawBitmap = retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST)
                     ?: continue
-                val scaled = Bitmap.createScaledBitmap(rawBitmap, targetW, targetH, true)
-                if (rawBitmap !== scaled) rawBitmap.recycle()
+                val fitted = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
+                Canvas(fitted).apply {
+                    drawColor(android.graphics.Color.BLACK)
+                    drawAspectFit(this, rawBitmap, 0f, 0f, targetW.toFloat(), targetH.toFloat(), Paint(Paint.FILTER_BITMAP_FLAG))
+                }
+                rawBitmap.recycle()
 
-                var processedFrame = scaled
+                var processedFrame = fitted
 
                 // Optional AI Color / Denoise / Sharpen per frame
                 if (config.applyAiColor || config.applyDenoise || config.applySharpen) {
@@ -594,8 +601,19 @@ class VideoProcessor(private val context: Context) {
         val startMs = System.currentTimeMillis()
         val outFile = File(context.cacheDir, "hung_merged_${System.currentTimeMillis()}.mp4")
 
-        val outW = (targetResolution.width / 16) * 16
-        val outH = (targetResolution.height / 16) * 16
+        val firstRetriever = MediaMetadataRetriever()
+        val isFirstPortrait = runCatching {
+            firstRetriever.setDataSource(context, sourceUris.first())
+            val w = firstRetriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 1280
+            val h = firstRetriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 720
+            val r = firstRetriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+            if (r == 90 || r == 270) w > h else h > w
+        }.getOrDefault(false).also { runCatching { firstRetriever.release() } }
+
+        val rawOutW = targetResolution.width
+        val rawOutH = targetResolution.height
+        val outW = if (layout == VideoMergeLayout.SEQUENTIAL && isFirstPortrait) (min(rawOutW, rawOutH) / 16) * 16 else (max(rawOutW, rawOutH) / 16) * 16
+        val outH = if (layout == VideoMergeLayout.SEQUENTIAL && isFirstPortrait) (max(rawOutW, rawOutH) / 16) * 16 else (min(rawOutW, rawOutH) / 16) * 16
         val fps = targetFps.coerceIn(24, 60)
         val bitrate = if (targetResolution == VideoResolutionPreset.RES_4K) 36_000_000 else 16_000_000
 

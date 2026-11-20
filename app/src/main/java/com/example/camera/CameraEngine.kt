@@ -196,8 +196,14 @@ class CameraEngine(
 
     fun updateDisplayRotation(rotationDegrees: Int) {
         displayRotationDegrees = rotationDegrees
+        refreshTextureTransform()
+    }
+
+    fun refreshTextureTransform() {
         textureView?.let { tv ->
-            if (tv.isAvailable) configureTextureTransform(tv.width, tv.height)
+            if (tv.isAvailable && tv.width > 0 && tv.height > 0) {
+                configureTextureTransform(tv.width, tv.height)
+            }
         }
     }
 
@@ -214,6 +220,7 @@ class CameraEngine(
         val lensChanged = activeLens?.cameraId != lens.cameraId || activeLens?.physicalId != lens.physicalId
         val modeChanged = currentMode != mode
         val liveChanged = (currentLiveDuration == LivePhotoDuration.OFF) != (liveDuration == LivePhotoDuration.OFF)
+        val aspectChanged = currentSettings.aspectRatio != settings.aspectRatio
         val formatChanged = currentSettings.photoFormat != settings.photoFormat ||
             currentSettings.photoResolutionTier != settings.photoResolutionTier ||
             currentSettings.videoResolution != settings.videoResolution ||
@@ -240,7 +247,7 @@ class CameraEngine(
             _runtimeState.value = _runtimeState.value.copy(activeZoom = currentZoomRatio)
             closeCamera()
             openCameraIfReady()
-        } else if (modeChanged || liveChanged || formatChanged) {
+        } else if (modeChanged || liveChanged || formatChanged || aspectChanged) {
             if (cameraDevice != null && textureView?.isAvailable == true) {
                 backgroundHandler?.post { createPreviewSession() }
             }
@@ -409,9 +416,13 @@ class CameraEngine(
         livePhotoBuffer = null
 
         val map = activeCharacteristics?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+        previewSize = chooseOptimalPreviewSize(activeCharacteristics, tv.width, tv.height)
+        scope.launch {
+            if (tv.isAvailable) configureTextureTransform(tv.width, tv.height)
+        }
         val activePreviewSurface = getOrCreatePreviewSurface(st)
 
-        // Setup Still ImageReader (JPEG or HEIC) from actual supported sizes
+        // Setup Still ImageReader (JPEG or HEIC) from actual supported sizes matching aspect ratio when available
         val imageFormat = if (
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
             currentSettings.photoFormat == PhotoFormat.HEIC &&
@@ -421,20 +432,31 @@ class CameraEngine(
         } else {
             ImageFormat.JPEG
         }
-        val supportedStillSizes = map?.getOutputSizes(imageFormat)
+        val allStillSizes = map?.getOutputSizes(imageFormat)
             ?.sortedByDescending { it.width * it.height }
             .orEmpty()
+        val desiredRatio = when (currentSettings.aspectRatio) {
+            com.example.model.AspectRatioMode.RATIO_16_9 -> 16f / 9f
+            com.example.model.AspectRatioMode.RATIO_4_3 -> 4f / 3f
+            com.example.model.AspectRatioMode.RATIO_1_1 -> 1f
+            com.example.model.AspectRatioMode.FULL_SCREEN -> 16f / 9f
+        }
+        val ratioMatchedStillSizes = allStillSizes.filter {
+            val r = it.width.toFloat() / it.height.toFloat().coerceAtLeast(1f)
+            abs(r - desiredRatio) < 0.08f
+        }.ifEmpty { allStillSizes }
+
         val chosenStillSize = when {
-            useMinimalTwoSurfaceFallback && supportedStillSizes.isNotEmpty() -> {
-                supportedStillSizes.firstOrNull { it.width <= 1920 && it.height <= 1440 }
-                    ?: supportedStillSizes.last()
+            useMinimalTwoSurfaceFallback && ratioMatchedStillSizes.isNotEmpty() -> {
+                ratioMatchedStillSizes.firstOrNull { it.width <= 1920 && it.height <= 1440 }
+                    ?: ratioMatchedStillSizes.last()
             }
-            currentSettings.photoResolutionTier == PhotoResolutionTier.MAX && supportedStillSizes.isNotEmpty() -> {
-                supportedStillSizes.first()
+            currentSettings.photoResolutionTier == PhotoResolutionTier.MAX && ratioMatchedStillSizes.isNotEmpty() -> {
+                ratioMatchedStillSizes.first()
             }
-            supportedStillSizes.isNotEmpty() -> {
-                supportedStillSizes.firstOrNull { it.width <= 4096 && it.height <= 3072 }
-                    ?: supportedStillSizes.first()
+            ratioMatchedStillSizes.isNotEmpty() -> {
+                ratioMatchedStillSizes.firstOrNull { it.width <= 4096 && it.height <= 3072 }
+                    ?: ratioMatchedStillSizes.first()
             }
             else -> Size(lens.standardPhotoWidth, lens.standardPhotoHeight)
         }
@@ -503,10 +525,20 @@ class CameraEngine(
         if (canAttachLiveSurface) {
             val codecSizes = map?.getOutputSizes(android.media.MediaCodec::class.java)?.toList().orEmpty()
                 .ifEmpty { map?.getOutputSizes(MediaRecorder::class.java)?.toList().orEmpty() }
-            val liveSize = codecSizes.firstOrNull { it.width == 1280 && it.height == 720 }
-                ?: codecSizes.firstOrNull { it.width == 1280 && it.height == 960 }
-                ?: codecSizes.firstOrNull { it.width <= 1280 && it.height <= 960 && it.width >= 640 }
-                ?: Size(640, 480)
+            val prefer16By9 = currentSettings.aspectRatio == com.example.model.AspectRatioMode.RATIO_16_9 ||
+                currentSettings.aspectRatio == com.example.model.AspectRatioMode.FULL_SCREEN
+            val liveSize = if (prefer16By9) {
+                codecSizes.firstOrNull { it.width == 1280 && it.height == 720 }
+                    ?: codecSizes.firstOrNull { it.width == 1280 && it.height == 960 }
+                    ?: codecSizes.firstOrNull { it.width <= 1280 && it.height <= 960 && it.width >= 640 }
+                    ?: Size(1280, 720)
+            } else {
+                codecSizes.firstOrNull { it.width == 1280 && it.height == 960 }
+                    ?: codecSizes.firstOrNull { it.width == 960 && it.height == 720 }
+                    ?: codecSizes.firstOrNull { it.width == 1280 && it.height == 720 }
+                    ?: codecSizes.firstOrNull { it.width <= 1280 && it.height <= 960 && it.width >= 640 }
+                    ?: Size(640, 480)
+            }
 
             val buf = LivePhotoRingBuffer(
                 width = liveSize.width,
@@ -776,11 +808,13 @@ class CameraEngine(
         _runtimeState.value = _runtimeState.value.copy(isCapturing = true)
         val shutterMonotonicUs = SystemClock.elapsedRealtimeNanos() / 1000L
 
+        val capturedOrientation = getJpegOrientation(lens)
+
         val captureBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
             addTarget(stillReader.surface)
             rawImageReader?.surface?.let { addTarget(it) }
             applyRequestParameters(this)
-            set(CaptureRequest.JPEG_ORIENTATION, getJpegOrientation(lens))
+            set(CaptureRequest.JPEG_ORIENTATION, capturedOrientation)
             set(CaptureRequest.JPEG_QUALITY, 97.toByte())
             if (currentFlash == FlashMode.ON) {
                 set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_SINGLE)
@@ -791,7 +825,19 @@ class CameraEngine(
             (currentMode == CameraMode.PHOTO && currentLiveDuration != LivePhotoDuration.OFF))
 
         val pairId = if (wantLive && livePhotoBuffer != null) UUID.randomUUID().toString() else null
-        pendingStillPairIds.add(pairId ?: "")
+        val tv = textureView
+        val isPortraitDisplay = displayRotationDegrees == 0 || displayRotationDegrees == 180
+        val targetUprightAspect = when (currentSettings.aspectRatio) {
+            com.example.model.AspectRatioMode.RATIO_1_1 -> 1f
+            com.example.model.AspectRatioMode.RATIO_4_3 -> if (isPortraitDisplay) 3f / 4f else 4f / 3f
+            com.example.model.AspectRatioMode.RATIO_16_9 -> if (isPortraitDisplay) 9f / 16f else 16f / 9f
+            com.example.model.AspectRatioMode.FULL_SCREEN -> {
+                if (tv != null && tv.width > 0 && tv.height > 0) {
+                    tv.width.toFloat() / tv.height.toFloat()
+                } else if (isPortraitDisplay) 9f / 19.5f else 19.5f / 9f
+            }
+        }
+        pendingStillCaptures.add(PendingStillCaptureMeta(pairId, targetUprightAspect))
 
         session.capture(captureBuilder.build(), object : CameraCaptureSession.CaptureCallback() {
             override fun onCaptureCompleted(s: CameraCaptureSession, r: CaptureRequest, result: TotalCaptureResult) {
@@ -799,12 +845,12 @@ class CameraEngine(
                 pendingRawCaptureResult = result
                 tryFinalizeRawCapture()
                 if (pairId != null) {
-                    finalizeLivePhotoClip(pairId, shutterMonotonicUs)
+                    finalizeLivePhotoClip(pairId, shutterMonotonicUs, capturedOrientation)
                 }
             }
 
             override fun onCaptureFailed(s: CameraCaptureSession, r: CaptureRequest, failure: CaptureFailure) {
-                pendingStillPairIds.poll()
+                pendingStillCaptures.poll()
                 _runtimeState.value = _runtimeState.value.copy(
                     isCapturing = false,
                     errorMessage = "Still capture failed (reason ${failure.reason})"
@@ -813,13 +859,13 @@ class CameraEngine(
         }, handler)
     }
 
-    private fun finalizeLivePhotoClip(pairId: String, shutterMonotonicUs: Long) {
+    private fun finalizeLivePhotoClip(pairId: String, shutterMonotonicUs: Long, orientationHint: Int) {
         val ring = livePhotoBuffer ?: return
         val durSec = if (currentLiveDuration == LivePhotoDuration.OFF) 3 else currentLiveDuration.seconds
         val tempFile = File(context.cacheDir, "live_$pairId.mp4")
 
         scope.launch(Dispatchers.IO) {
-            val clipRes = ring.captureClipAroundShutter(durSec, shutterMonotonicUs, tempFile)
+            val clipRes = ring.captureClipAroundShutter(durSec, shutterMonotonicUs, tempFile, orientationHint)
             clipRes.onSuccess { clip ->
                 val uriRes = mediaRepo.saveVideoFileToMediaStore(
                     sourceFile = clip.file,
@@ -875,11 +921,16 @@ class CameraEngine(
         val shutterOffsetMs: Long
     )
 
+    private data class PendingStillCaptureMeta(
+        val pairId: String?,
+        val targetUprightAspect: Float
+    )
+
     private val pendingLiveClips = java.util.concurrent.ConcurrentHashMap<String, PendingLiveClipMeta>()
-    private val pendingStillPairIds = java.util.concurrent.ConcurrentLinkedQueue<String>()
+    private val pendingStillCaptures = java.util.concurrent.ConcurrentLinkedQueue<PendingStillCaptureMeta>()
 
     private fun handleStillImageCaptured(image: Image, format: Int) {
-        val bytes = ByteArrayOutputStream().use { out ->
+        val rawBytes = ByteArrayOutputStream().use { out ->
             val buf = image.planes[0].buffer
             val data = ByteArray(buf.remaining())
             buf.get(data)
@@ -895,20 +946,33 @@ class CameraEngine(
         val exp = result?.get(CaptureResult.SENSOR_EXPOSURE_TIME)
         val lens = activeLens
 
-        val queuedPairId = pendingStillPairIds.poll()?.takeIf { it.isNotBlank() }
+        val captureMeta = pendingStillCaptures.poll()
+        val queuedPairId = captureMeta?.pairId?.takeIf { it.isNotBlank() }
+        val targetUprightAspect = captureMeta?.targetUprightAspect
 
-        val ext = if (format == ImageFormat.HEIC) "heic" else "jpg"
-        val mime = if (format == ImageFormat.HEIC) "image/heic" else "image/jpeg"
+        val rawExt = if (format == ImageFormat.HEIC) "heic" else "jpg"
+        val rawMime = if (format == ImageFormat.HEIC) "image/heic" else "image/jpeg"
 
         scope.launch(Dispatchers.IO) {
+            val cropped = if (targetUprightAspect != null && targetUprightAspect > 0f) {
+                cropStillBytesToTargetAspect(rawBytes, targetUprightAspect)
+            } else {
+                null
+            }
+            val finalBytes = cropped?.first ?: rawBytes
+            val finalW = cropped?.second ?: w
+            val finalH = cropped?.third ?: h
+            val ext = if (cropped != null) "jpg" else rawExt
+            val mime = if (cropped != null) "image/jpeg" else rawMime
+
             val pendingMeta = queuedPairId?.let { pendingLiveClips.remove(it) }
 
             val saveRes = mediaRepo.saveCapturedPhotoBytes(
-                bytes = bytes,
+                bytes = finalBytes,
                 mimeType = mime,
                 extension = ext,
-                width = w,
-                height = h,
+                width = finalW,
+                height = finalH,
                 lensLabel = lens?.displayLabel ?: "Main",
                 iso = iso,
                 exposureTimeNs = exp,
@@ -919,10 +983,14 @@ class CameraEngine(
                 liveHasAudio = pendingMeta?.hasAudio ?: false,
                 shutterOffsetMs = pendingMeta?.shutterOffsetMs ?: 0L
             )
-            saveRes.onSuccess {
+            saveRes.onSuccess { saved ->
                 _runtimeState.value = _runtimeState.value.copy(
                     isCapturing = false,
-                    statusBanner = if (pendingMeta != null) "Saved Live Photo (${pendingMeta.durationSec}s)" else "Captured ${w}x$h ${ext.uppercase()}"
+                    statusBanner = if (pendingMeta != null) {
+                        "Saved Live Photo (${pendingMeta.durationSec}s)"
+                    } else {
+                        "Captured ${saved.width}x${saved.height} ${ext.uppercase()}"
+                    }
                 )
             }.onFailure { err ->
                 _runtimeState.value = _runtimeState.value.copy(
@@ -931,6 +999,66 @@ class CameraEngine(
                 )
             }
         }
+    }
+
+    private fun cropStillBytesToTargetAspect(
+        bytes: ByteArray,
+        targetUprightAspect: Float
+    ): Triple<ByteArray, Int, Int>? {
+        return runCatching {
+            val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            val bw = bounds.outWidth
+            val bh = bounds.outHeight
+            if (bw <= 0 || bh <= 0) return null
+
+            val exifOrient = android.media.ExifInterface(java.io.ByteArrayInputStream(bytes))
+                .getAttributeInt(
+                    android.media.ExifInterface.TAG_ORIENTATION,
+                    android.media.ExifInterface.ORIENTATION_NORMAL
+                )
+            val swapped = exifOrient == android.media.ExifInterface.ORIENTATION_ROTATE_90 ||
+                exifOrient == android.media.ExifInterface.ORIENTATION_ROTATE_270 ||
+                exifOrient == android.media.ExifInterface.ORIENTATION_TRANSPOSE ||
+                exifOrient == android.media.ExifInterface.ORIENTATION_TRANSVERSE
+            val uprightW = if (swapped) bh else bw
+            val uprightH = if (swapped) bw else bh
+            val actualAspect = uprightW.toFloat() / uprightH.toFloat().coerceAtLeast(1f)
+            if (abs(actualAspect - targetUprightAspect) <= 0.04f) {
+                return null
+            }
+
+            val decoded = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+            val orientMatrix = Matrix().apply {
+                when (exifOrient) {
+                    android.media.ExifInterface.ORIENTATION_ROTATE_90 -> postRotate(90f)
+                    android.media.ExifInterface.ORIENTATION_ROTATE_180 -> postRotate(180f)
+                    android.media.ExifInterface.ORIENTATION_ROTATE_270 -> postRotate(270f)
+                    android.media.ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> postScale(-1f, 1f)
+                    android.media.ExifInterface.ORIENTATION_FLIP_VERTICAL -> postScale(1f, -1f)
+                    android.media.ExifInterface.ORIENTATION_TRANSPOSE -> { postRotate(90f); postScale(-1f, 1f) }
+                    android.media.ExifInterface.ORIENTATION_TRANSVERSE -> { postRotate(270f); postScale(-1f, 1f) }
+                }
+            }
+            val uprightBmp = if (!orientMatrix.isIdentity) {
+                android.graphics.Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, orientMatrix, true).also {
+                    if (it !== decoded) decoded.recycle()
+                }
+            } else {
+                decoded
+            }
+
+            val cropped = centerCropBitmapToAspect(uprightBmp, targetUprightAspect)
+            if (cropped !== uprightBmp) uprightBmp.recycle()
+
+            val out = ByteArrayOutputStream()
+            cropped.compress(android.graphics.Bitmap.CompressFormat.JPEG, 96, out)
+            val outBytes = out.toByteArray()
+            val outW = cropped.width
+            val outH = cropped.height
+            cropped.recycle()
+            Triple(outBytes, outW, outH)
+        }.getOrNull()
     }
 
     private fun tryFinalizeRawCapture() {
@@ -1282,11 +1410,25 @@ class CameraEngine(
     private fun chooseOptimalPreviewSize(chars: CameraCharacteristics?, viewW: Int, viewH: Int): Size {
         val map = chars?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return Size(1280, 720)
         val choices = map.getOutputSizes(SurfaceTexture::class.java) ?: return Size(1280, 720)
-        val targetRatio = if (viewW > 0 && viewH > 0) max(viewW, viewH).toFloat() / min(viewW, viewH).toFloat() else 4f / 3f
+        val isVideoFamily = currentMode == CameraMode.VIDEO ||
+            currentMode == CameraMode.SLOW_MOTION ||
+            currentMode == CameraMode.TIMELAPSE
+        val targetRatio = if (isVideoFamily) {
+            16f / 9f
+        } else {
+            when (currentSettings.aspectRatio) {
+                com.example.model.AspectRatioMode.RATIO_4_3 -> 4f / 3f
+                com.example.model.AspectRatioMode.RATIO_16_9 -> 16f / 9f
+                com.example.model.AspectRatioMode.RATIO_1_1 -> 4f / 3f
+                com.example.model.AspectRatioMode.FULL_SCREEN -> {
+                    if (viewW > 0 && viewH > 0) max(viewW, viewH).toFloat() / min(viewW, viewH).toFloat() else 16f / 9f
+                }
+            }
+        }
         val bounded = choices.filter { it.width <= 1920 && it.height <= 1080 }
         val pool = bounded.ifEmpty { choices.toList() }
         return pool.minByOrNull { size ->
-            val r = size.width.toFloat() / size.height.toFloat()
+            val r = size.width.toFloat() / size.height.toFloat().coerceAtLeast(1f)
             abs(r - targetRatio) * 1000f - (size.width * size.height) / 1_000_000f
         } ?: choices.last()
     }
@@ -1296,10 +1438,11 @@ class CameraEngine(
         if (viewWidth == 0 || viewHeight == 0) return
         val matrix = Matrix()
         val viewRect = RectF(0f, 0f, viewWidth.toFloat(), viewHeight.toFloat())
-        val bufferRect = RectF(0f, 0f, previewSize.height.toFloat(), previewSize.width.toFloat())
         val centerX = viewRect.centerX()
         val centerY = viewRect.centerY()
+
         if (displayRotationDegrees == 90 || displayRotationDegrees == 270) {
+            val bufferRect = RectF(0f, 0f, previewSize.height.toFloat(), previewSize.width.toFloat())
             bufferRect.offset(centerX - bufferRect.centerX(), centerY - bufferRect.centerY())
             matrix.setRectToRect(viewRect, bufferRect, Matrix.ScaleToFit.FILL)
             val scale = max(
@@ -1308,21 +1451,62 @@ class CameraEngine(
             )
             matrix.postScale(scale, scale, centerX, centerY)
             matrix.postRotate((displayRotationDegrees - 180).toFloat(), centerX, centerY)
-        } else if (displayRotationDegrees == 180) {
-            matrix.postRotate(180f, centerX, centerY)
+        } else {
+            // Portrait (0 or 180): buffer is naturally upright (height x width for 90/270 sensor)
+            val sensorSwapped = (activeLens?.sensorOrientation ?: 90) % 180 != 0
+            val bufW = (if (sensorSwapped) previewSize.height else previewSize.width).toFloat()
+            val bufH = (if (sensorSwapped) previewSize.width else previewSize.height).toFloat()
+            val k = max(viewWidth.toFloat() / bufW, viewHeight.toFloat() / bufH)
+            val scaleX = (k * bufW) / viewWidth.toFloat()
+            val scaleY = (k * bufH) / viewHeight.toFloat()
+            matrix.setScale(scaleX, scaleY, centerX, centerY)
+            if (displayRotationDegrees == 180) {
+                matrix.postRotate(180f, centerX, centerY)
+            }
         }
         tv.setTransform(matrix)
     }
 
     private fun getJpegOrientation(lens: CameraLensInfo): Int {
-        val deviceRotation = when (displayRotationDegrees) {
-            90 -> 0
-            180 -> 270
-            270 -> 180
-            else -> 90
+        return computeJpegOrientation(
+            sensorOrientation = lens.sensorOrientation,
+            lensFacing = lens.lensFacing,
+            displayRotationDegrees = displayRotationDegrees
+        )
+    }
+
+    companion object {
+        fun computeJpegOrientation(
+            sensorOrientation: Int,
+            lensFacing: Int,
+            displayRotationDegrees: Int
+        ): Int {
+            val sign = if (lensFacing == CameraCharacteristics.LENS_FACING_FRONT) 1 else -1
+            return (sensorOrientation + displayRotationDegrees * sign + 360) % 360
         }
-        val sign = if (lens.lensFacing == CameraCharacteristics.LENS_FACING_FRONT) 1 else -1
-        return (lens.sensorOrientation + deviceRotation * sign + 360) % 360
+
+        fun centerCropBitmapToAspect(
+            bitmap: android.graphics.Bitmap,
+            targetAspect: Float
+        ): android.graphics.Bitmap {
+            val curW = bitmap.width
+            val curH = bitmap.height
+            if (curW <= 0 || curH <= 0 || targetAspect <= 0f) return bitmap
+            val curAspect = curW.toFloat() / curH.toFloat()
+            if (abs(curAspect - targetAspect) <= 0.02f) return bitmap
+            val cropW: Int
+            val cropH: Int
+            if (curAspect > targetAspect) {
+                cropH = curH
+                cropW = (curH * targetAspect).roundToInt().coerceIn(1, curW)
+            } else {
+                cropW = curW
+                cropH = (curW / targetAspect).roundToInt().coerceIn(1, curH)
+            }
+            val x = ((curW - cropW) / 2).coerceAtLeast(0)
+            val y = ((curH - cropH) / 2).coerceAtLeast(0)
+            return android.graphics.Bitmap.createBitmap(bitmap, x, y, cropW, cropH)
+        }
     }
 
     private fun kelvinToRggbGains(kelvin: Int): RggbChannelVector {

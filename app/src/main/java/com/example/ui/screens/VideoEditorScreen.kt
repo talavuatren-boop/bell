@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
 import android.net.Uri
 import android.view.Surface
@@ -11,9 +12,12 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -155,8 +159,11 @@ fun VideoEditorScreen(
             }
         }
 
-        // Video Preview
-        Box(
+        // Video Preview (aspect-ratio safe)
+        val editorAspect = remember(asset.width, asset.height) {
+            if (asset.width > 0 && asset.height > 0) asset.width.toFloat() / asset.height.toFloat() else 9f / 16f
+        }
+        BoxWithConstraints(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(230.dp)
@@ -165,6 +172,12 @@ fun VideoEditorScreen(
                 .background(ElevatedObsidian),
             contentAlignment = Alignment.Center
         ) {
+            val boxRatio = maxWidth / maxHeight
+            val fitMod = if (editorAspect > boxRatio) {
+                Modifier.fillMaxWidth().aspectRatio(editorAspect)
+            } else {
+                Modifier.fillMaxHeight().aspectRatio(editorAspect)
+            }
             AndroidView(
                 factory = { ctx ->
                     TextureView(ctx).apply {
@@ -189,7 +202,7 @@ fun VideoEditorScreen(
                         }
                     }
                 },
-                modifier = Modifier.fillMaxSize()
+                modifier = fitMod
             )
             IconButton(
                 onClick = {
