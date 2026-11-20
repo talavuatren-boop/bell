@@ -8,6 +8,7 @@ import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.media.MediaRecorder
+import android.os.Bundle
 import android.os.SystemClock
 import android.view.Surface
 import kotlinx.coroutines.delay
@@ -16,7 +17,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 data class EncodedFrame(
     val data: ByteArray,
-    val ptsUs: Long,
+    val codecPtsUs: Long,
+    val wallTimeUs: Long,
     val flags: Int
 )
 
@@ -31,15 +33,16 @@ data class LiveClipResult(
 
 /**
  * Circular rolling MediaCodec buffer for true pre-shutter + post-shutter Live Photo capture.
- * Uses monotonic SystemClock.elapsedRealtimeNanos() timestamps to synchronize still exposure
- * and encoded video/audio streams without dropping or duplicating frames.
+ * Uses unified SystemClock.elapsedRealtimeNanos() wallTimeUs across video, audio, and shutter events
+ * so deep-sleep / CLOCK_MONOTONIC vs CLOCK_BOOTTIME offsets never truncate 2s / 3s / 5s clips,
+ * while preserving exact codecPtsUs frame deltas and frequent sync keyframes.
  */
 class LivePhotoRingBuffer(
     val width: Int = 1280,
     val height: Int = 960,
-    val bitrateBps: Int = 14_000_000,
+    val bitrateBps: Int = 12_000_000,
     val fps: Int = 30,
-    private val maxBufferSeconds: Int = 6
+    private val maxBufferSeconds: Int = 8
 ) {
     private var videoEncoder: MediaCodec? = null
     private var audioEncoder: MediaCodec? = null
@@ -55,8 +58,8 @@ class LivePhotoRingBuffer(
 
     private val videoLock = Any()
     private val audioLock = Any()
-    private val videoPackets = ArrayDeque<EncodedFrame>(320)
-    private val audioPackets = ArrayDeque<EncodedFrame>(512)
+    private val videoPackets = ArrayDeque<EncodedFrame>(360)
+    private val audioPackets = ArrayDeque<EncodedFrame>(640)
 
     @Volatile
     private var audioEnabled = false
@@ -74,6 +77,9 @@ class LivePhotoRingBuffer(
                 setInteger(MediaFormat.KEY_BIT_RATE, bitrateBps)
                 setInteger(MediaFormat.KEY_FRAME_RATE, fps)
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O_MR1) {
+                    setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
+                }
             }
             val vCodec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
             vCodec.configure(vFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
@@ -142,8 +148,18 @@ class LivePhotoRingBuffer(
         val codec = videoEncoder ?: return
         val info = MediaCodec.BufferInfo()
         val maxWindowUs = maxBufferSeconds * 1_000_000L
+        var lastSyncRequestMs = 0L
 
         while (running.get()) {
+            val nowMs = SystemClock.elapsedRealtime()
+            if (nowMs - lastSyncRequestMs >= 500L) {
+                lastSyncRequestMs = nowMs
+                runCatching {
+                    val syncBundle = Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) }
+                    codec.setParameters(syncBundle)
+                }
+            }
+
             val outIdx = runCatching { codec.dequeueOutputBuffer(info, 10_000L) }.getOrDefault(-1)
             when {
                 outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
@@ -157,18 +173,32 @@ class LivePhotoRingBuffer(
                         buf.limit(info.offset + info.size)
                         buf.get(bytes)
 
-                        val monotonicUs = SystemClock.elapsedRealtimeNanos() / 1000L
-                        val ptsUs = if (info.presentationTimeUs > 0L) info.presentationTimeUs else monotonicUs
+                        val wallUs = SystemClock.elapsedRealtimeNanos() / 1000L
+                        val codecPts = if (info.presentationTimeUs > 0L) info.presentationTimeUs else wallUs
 
                         synchronized(videoLock) {
-                            videoPackets.addLast(EncodedFrame(bytes, ptsUs, info.flags))
-                            val cutoff = ptsUs - maxWindowUs
-                            while (videoPackets.size > 15 && videoPackets.first().ptsUs < cutoff) {
-                                // Only trim up to a safe window before the oldest needed keyframe
-                                val next = videoPackets.elementAtOrNull(1)
-                                if (next != null && next.ptsUs < cutoff && (next.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0) {
-                                    videoPackets.removeFirst()
-                                } else if (videoPackets.size > maxBufferSeconds * fps + 60) {
+                            videoPackets.addLast(
+                                EncodedFrame(
+                                    data = bytes,
+                                    codecPtsUs = codecPts,
+                                    wallTimeUs = wallUs,
+                                    flags = info.flags
+                                )
+                            )
+                            val cutoff = wallUs - maxWindowUs
+                            while (videoPackets.size > 15 && videoPackets.first().wallTimeUs < cutoff) {
+                                var nextKeyIdx = -1
+                                for (idx in 1 until videoPackets.size) {
+                                    val candidate = videoPackets[idx]
+                                    if (candidate.wallTimeUs >= cutoff) break
+                                    if ((candidate.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0) {
+                                        nextKeyIdx = idx
+                                        break
+                                    }
+                                }
+                                if (nextKeyIdx > 0) {
+                                    repeat(nextKeyIdx) { videoPackets.removeFirst() }
+                                } else if (videoPackets.size > maxBufferSeconds * fps + 90) {
                                     videoPackets.removeFirst()
                                 } else {
                                     break
@@ -213,10 +243,20 @@ class LivePhotoRingBuffer(
                         buf.position(info.offset)
                         buf.limit(info.offset + info.size)
                         buf.get(bytes)
+                        val wallUs = SystemClock.elapsedRealtimeNanos() / 1000L
+                        val pts = if (info.presentationTimeUs > 0L) info.presentationTimeUs else wallUs
+                        val effectiveWallUs = if (kotlin.math.abs(pts - wallUs) < 2_000_000L) pts else wallUs
                         synchronized(audioLock) {
-                            audioPackets.addLast(EncodedFrame(bytes, info.presentationTimeUs, info.flags))
-                            val cutoff = info.presentationTimeUs - maxWindowUs
-                            while (audioPackets.isNotEmpty() && audioPackets.first().ptsUs < cutoff) {
+                            audioPackets.addLast(
+                                EncodedFrame(
+                                    data = bytes,
+                                    codecPtsUs = pts,
+                                    wallTimeUs = effectiveWallUs,
+                                    flags = info.flags
+                                )
+                            )
+                            val cutoff = effectiveWallUs - maxWindowUs
+                            while (audioPackets.isNotEmpty() && audioPackets.first().wallTimeUs < cutoff) {
                                 audioPackets.removeFirst()
                             }
                         }
@@ -229,10 +269,16 @@ class LivePhotoRingBuffer(
     }
 
     fun currentBufferStatusLabel(): String {
-        val count = synchronized(videoLock) { videoPackets.size }
+        val (count, spanSec) = synchronized(videoLock) {
+            val c = videoPackets.size
+            val span = if (c >= 2) {
+                ((videoPackets.last().wallTimeUs - videoPackets.first().wallTimeUs) / 1_000_000f).coerceAtLeast(0f)
+            } else 0f
+            c to span
+        }
         return if (!running.get()) "Standby"
         else if (count < 10) "Priming..."
-        else "Ring ${(count / fps.toFloat()).let { String.format("%.1fs", it) }}"
+        else "Ring ${String.format("%.1fs", spanSec)}"
     }
 
     suspend fun captureClipAroundShutter(
@@ -241,14 +287,23 @@ class LivePhotoRingBuffer(
         outputFile: File,
         orientationHint: Int = 90
     ): Result<LiveClipResult> {
-        if (!running.get() || videoFormat == null) {
+        if (!running.get()) {
             return Result.failure(IllegalStateException("Live Photo ring buffer is not active"))
         }
 
-        val halfWindowUs = (durationSeconds * 1_000_000L) / 2L
-        // Wait for post-shutter half window + small encoder flush margin
-        val postWaitMs = (halfWindowUs / 1000L) + 160L
-        delay(postWaitMs)
+        val targetMs = durationSeconds * 1000L
+        val halfWindowMs = targetMs / 2L
+        val preAvailableMs = synchronized(videoLock) {
+            val firstWall = videoPackets.firstOrNull()?.wallTimeUs
+            if (firstWall != null && firstWall < shutterMonotonicUs) {
+                ((shutterMonotonicUs - firstWall) / 1000L).coerceIn(0L, halfWindowMs)
+            } else 0L
+        }
+        // If buffer started very recently, extend post-shutter window so total clip still meets 2s/3s/5s
+        val postNeededMs = (targetMs - preAvailableMs).coerceIn(halfWindowMs, targetMs)
+        val alreadyElapsedMs = ((SystemClock.elapsedRealtimeNanos() / 1000L - shutterMonotonicUs) / 1000L).coerceAtLeast(0L)
+        val remainingWaitMs = (postNeededMs + 280L - alreadyElapsedMs).coerceAtLeast(160L)
+        delay(remainingWaitMs)
 
         val vSnapshot: List<EncodedFrame>
         synchronized(videoLock) {
@@ -264,35 +319,30 @@ class LivePhotoRingBuffer(
             return Result.failure(IllegalStateException("No buffered frames available"))
         }
 
-        val latestFramePts = vSnapshot.last().ptsUs
-        val targetStartUs = (shutterMonotonicUs - halfWindowUs).coerceAtMost(latestFramePts - 500_000L)
-        val targetEndUs = shutterMonotonicUs + halfWindowUs
+        val windowRange = selectWindowIndices(
+            wallTimesUs = vSnapshot.map { it.wallTimeUs },
+            isKeyFrames = vSnapshot.map { (it.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0 },
+            shutterWallUs = shutterMonotonicUs,
+            durationSeconds = durationSeconds
+        ) ?: return Result.failure(IllegalStateException("No sync keyframe found in buffer"))
 
-        // Find the closest keyframe at or before targetStartUs so there are no black/corrupted frames
-        var startIdx = vSnapshot.indexOfLast {
-            it.ptsUs <= targetStartUs && (it.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
-        }
-        if (startIdx < 0) {
-            startIdx = vSnapshot.indexOfFirst { (it.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0 }
-        }
-        if (startIdx < 0) {
-            return Result.failure(IllegalStateException("No sync keyframe found in buffer"))
-        }
+        val selectedVideo = vSnapshot.subList(windowRange.first, windowRange.last + 1)
+        val firstWallUs = selectedVideo.first().wallTimeUs
+        val lastWallUs = selectedVideo.last().wallTimeUs
+        val firstCodecPtsUs = selectedVideo.first().codecPtsUs
+        val shutterOffsetMs = ((shutterMonotonicUs - firstWallUs) / 1000L).coerceAtLeast(0L)
 
-        val selectedVideo = vSnapshot.subList(startIdx, vSnapshot.size)
-            .filter { it.ptsUs <= targetEndUs }
-            .ifEmpty { vSnapshot.subList(startIdx, vSnapshot.size) }
-
-        val firstPtsUs = selectedVideo.first().ptsUs
-        val lastPtsUs = selectedVideo.last().ptsUs
-        val shutterOffsetMs = ((shutterMonotonicUs - firstPtsUs) / 1000L).coerceAtLeast(0L)
+        // Detect if codecPtsUs advances properly across selected frames; otherwise fall back to wallTimeUs deltas
+        val codecSpanUs = selectedVideo.last().codecPtsUs - firstCodecPtsUs
+        val wallSpanUs = (lastWallUs - firstWallUs).coerceAtLeast(1L)
+        val useCodecDeltas = selectedVideo.size <= 1 || (codecSpanUs > wallSpanUs / 3L && codecSpanUs < wallSpanUs * 3L)
 
         return runCatching {
             val muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
             val vTrack = muxer.addTrack(vFmt)
             val aFmt = audioFormat
             val selectedAudio = if (aFmt != null && aSnapshot.isNotEmpty()) {
-                aSnapshot.filter { it.ptsUs in firstPtsUs..lastPtsUs }
+                aSnapshot.filter { it.wallTimeUs in firstWallUs..lastWallUs }
             } else {
                 emptyList()
             }
@@ -303,7 +353,8 @@ class LivePhotoRingBuffer(
             val info = MediaCodec.BufferInfo()
             var lastWrittenV = -1L
             for (pkt in selectedVideo) {
-                val relPts = (pkt.ptsUs - firstPtsUs).coerceAtLeast(lastWrittenV + 1L)
+                val rawRel = if (useCodecDeltas) (pkt.codecPtsUs - firstCodecPtsUs) else (pkt.wallTimeUs - firstWallUs)
+                val relPts = rawRel.coerceAtLeast(lastWrittenV + 1L)
                 lastWrittenV = relPts
                 info.set(0, pkt.data.size, relPts, pkt.flags)
                 muxer.writeSampleData(vTrack, java.nio.ByteBuffer.wrap(pkt.data), info)
@@ -312,7 +363,7 @@ class LivePhotoRingBuffer(
             if (aTrack >= 0) {
                 var lastWrittenA = -1L
                 for (pkt in selectedAudio) {
-                    val relPts = (pkt.ptsUs - firstPtsUs).coerceAtLeast(lastWrittenA + 1L)
+                    val relPts = (pkt.wallTimeUs - firstWallUs).coerceAtLeast(lastWrittenA + 1L)
                     lastWrittenA = relPts
                     info.set(0, pkt.data.size, relPts, pkt.flags)
                     muxer.writeSampleData(aTrack, java.nio.ByteBuffer.wrap(pkt.data), info)
@@ -327,7 +378,7 @@ class LivePhotoRingBuffer(
                 width = width,
                 height = height,
                 shutterOffsetMs = shutterOffsetMs,
-                totalDurationMs = ((lastPtsUs - firstPtsUs) / 1000L).coerceAtLeast(500L),
+                totalDurationMs = ((lastWallUs - firstWallUs) / 1000L).coerceAtLeast(400L),
                 hasAudio = aTrack >= 0
             )
         }
@@ -357,5 +408,45 @@ class LivePhotoRingBuffer(
 
         synchronized(videoLock) { videoPackets.clear() }
         synchronized(audioLock) { audioPackets.clear() }
+    }
+
+    companion object {
+        fun selectWindowIndices(
+            wallTimesUs: List<Long>,
+            isKeyFrames: List<Boolean>,
+            shutterWallUs: Long,
+            durationSeconds: Int
+        ): IntRange? {
+            if (wallTimesUs.isEmpty() || wallTimesUs.size != isKeyFrames.size) return null
+            val targetDurationUs = durationSeconds * 1_000_000L
+            val halfWindowUs = targetDurationUs / 2L
+            val latestWall = wallTimesUs.last()
+            val targetStartWall = (shutterWallUs - halfWindowUs).coerceAtMost(latestWall - 400_000L)
+
+            var startIdx = -1
+            for (i in wallTimesUs.indices.reversed()) {
+                if (isKeyFrames[i] && wallTimesUs[i] <= targetStartWall) {
+                    startIdx = i
+                    break
+                }
+            }
+            if (startIdx < 0) {
+                startIdx = isKeyFrames.indexOfFirst { it }
+            }
+            if (startIdx < 0) return null
+
+            val actualStartWall = wallTimesUs[startIdx]
+            // Ensure full target duration is preserved even if pre-shutter started slightly later
+            val desiredEndWall = maxOf(shutterWallUs + halfWindowUs, actualStartWall + targetDurationUs)
+            var endIdx = startIdx
+            for (i in startIdx until wallTimesUs.size) {
+                if (wallTimesUs[i] <= desiredEndWall) {
+                    endIdx = i
+                } else {
+                    break
+                }
+            }
+            return startIdx..endIdx
+        }
     }
 }

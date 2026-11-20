@@ -31,6 +31,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.CameraLensInfo
 import com.example.model.ProCameraParameters
+import com.example.model.ProCaptureType
 import com.example.model.WhiteBalancePreset
 import com.example.ui.theme.CardSlate
 import com.example.ui.theme.ElevatedObsidian
@@ -54,6 +55,8 @@ private enum class ProControlTab(val label: String) {
 fun ProControlDeck(
     lens: CameraLensInfo?,
     params: ProCameraParameters,
+    captureType: ProCaptureType,
+    onSelectCaptureType: (ProCaptureType) -> Unit,
     liveIso: Int?,
     liveExposureNs: Long?,
     onUpdate: ((ProCameraParameters) -> ProCameraParameters) -> Unit,
@@ -69,22 +72,34 @@ fun ProControlDeck(
             .border(1.dp, HairlineBorder, RoundedCornerShape(18.dp))
             .padding(horizontal = 12.dp, vertical = 10.dp)
     ) {
-        // Live telemetry readout + capability-gated PRO assist chips
+        // Live telemetry readout + PRO Photo/Video switch + capability-gated assist chips
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            ProToggleChip(
+                label = "ẢNH",
+                active = captureType == ProCaptureType.PHOTO,
+                onClick = { onSelectCaptureType(ProCaptureType.PHOTO) },
+                tag = "pro_mode_photo_chip"
+            )
+            ProToggleChip(
+                label = "VIDEO",
+                active = captureType == ProCaptureType.VIDEO,
+                onClick = { onSelectCaptureType(ProCaptureType.VIDEO) },
+                tag = "pro_mode_video_chip"
+            )
             val dispIso = if (params.autoExposure) (liveIso ?: params.iso) else params.iso
             val dispExp = if (params.autoExposure) (liveExposureNs ?: params.exposureTimeNs) else params.exposureTimeNs
             Text(
                 text = "ISO $dispIso • ${formatShutterSpeed(dispExp)}",
                 style = MonoTelemetrySmall,
-                color = accent
+                color = accent,
+                modifier = Modifier.padding(horizontal = 4.dp)
             )
-            Spacer(modifier = Modifier.weight(1f, fill = false))
 
             ProToggleChip(
                 label = "PEAK",
@@ -98,7 +113,7 @@ fun ProControlDeck(
                 onClick = { onUpdate { it.copy(exposureWarningEnabled = !it.exposureWarningEnabled) } },
                 tag = "pro_exposure_warning_chip"
             )
-            if (lens?.supportsRaw == true) {
+            if (captureType == ProCaptureType.PHOTO && lens?.supportsRaw == true) {
                 ProToggleChip(
                     label = "RAW",
                     active = params.captureRawDng,

@@ -28,7 +28,7 @@ data class HungCamSettings(
     // Camera settings
     val defaultLensFacingBack: Boolean = true,
     val defaultCameraMode: CameraMode = CameraMode.PHOTO,
-    val photoResolutionTier: PhotoResolutionTier = PhotoResolutionTier.MAX,
+    val photoResolutionTier: PhotoResolutionTier = PhotoResolutionTier.STANDARD,
     val photoFormat: PhotoFormat = PhotoFormat.JPEG,
     val hdrEnabled: Boolean = true,
     val videoResolution: VideoResolutionPreset = VideoResolutionPreset.RES_1080P,
@@ -97,7 +97,7 @@ class SettingsDataStore(private val context: Context) {
         HungCamSettings(
             defaultLensFacingBack = prefs[Keys.DEFAULT_BACK] ?: true,
             defaultCameraMode = enumValueOrDefault(prefs[Keys.DEFAULT_MODE], CameraMode.PHOTO),
-            photoResolutionTier = enumValueOrDefault(prefs[Keys.PHOTO_RES_TIER], PhotoResolutionTier.MAX),
+            photoResolutionTier = enumValueOrDefault(prefs[Keys.PHOTO_RES_TIER], PhotoResolutionTier.STANDARD),
             photoFormat = enumValueOrDefault(prefs[Keys.PHOTO_FORMAT], PhotoFormat.JPEG),
             hdrEnabled = prefs[Keys.HDR_ENABLED] ?: true,
             videoResolution = enumValueOrDefault(prefs[Keys.VIDEO_RES], VideoResolutionPreset.RES_1080P),
@@ -131,7 +131,7 @@ class SettingsDataStore(private val context: Context) {
             val current = HungCamSettings(
                 defaultLensFacingBack = prefs[Keys.DEFAULT_BACK] ?: true,
                 defaultCameraMode = enumValueOrDefault(prefs[Keys.DEFAULT_MODE], CameraMode.PHOTO),
-                photoResolutionTier = enumValueOrDefault(prefs[Keys.PHOTO_RES_TIER], PhotoResolutionTier.MAX),
+                photoResolutionTier = enumValueOrDefault(prefs[Keys.PHOTO_RES_TIER], PhotoResolutionTier.STANDARD),
                 photoFormat = enumValueOrDefault(prefs[Keys.PHOTO_FORMAT], PhotoFormat.JPEG),
                 hdrEnabled = prefs[Keys.HDR_ENABLED] ?: true,
                 videoResolution = enumValueOrDefault(prefs[Keys.VIDEO_RES], VideoResolutionPreset.RES_1080P),

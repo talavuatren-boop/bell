@@ -9,11 +9,21 @@ enum class MainNavDestination(val route: String, val label: String) {
 
 enum class CameraMode(val label: String) {
     PHOTO("PHOTO"),
-    PRO("PRO"),
     VIDEO("VIDEO"),
-    LIVE("LIVE"),
+    PORTRAIT("CHÂN DUNG"),
+    PRO("PRO"),
     SLOW_MOTION("SLOW-MO"),
-    TIMELAPSE("TIMELAPSE")
+    TIMELAPSE("TIMELAPSE");
+
+    companion object {
+        val primaryBarModes: List<CameraMode> = listOf(PHOTO, VIDEO, PORTRAIT)
+        val extraMoreModes: List<CameraMode> = listOf(PRO, SLOW_MOTION, TIMELAPSE)
+    }
+}
+
+enum class ProCaptureType(val label: String) {
+    PHOTO("ẢNH"),
+    VIDEO("VIDEO")
 }
 
 enum class AspectRatioMode(val label: String, val ratioWidth: Float, val ratioHeight: Float) {

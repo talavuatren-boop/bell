@@ -45,6 +45,7 @@ import com.example.model.LivePhotoDuration
 import com.example.model.PhotoFormat
 import com.example.model.PhotoResolutionTier
 import com.example.model.ProCameraParameters
+import com.example.model.ProCaptureType
 import com.example.model.SlowMoOption
 import com.example.model.StabilizationMode
 import com.example.model.TimelapseSpeed
@@ -52,13 +53,18 @@ import com.example.model.VideoBitrateTier
 import com.example.model.VideoCodecOption
 import com.example.model.VideoResolutionPreset
 import com.example.model.WhiteBalancePreset
+import com.example.processing.ImageProcessor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -119,8 +125,12 @@ class CameraEngine(
     private var analysisImageReader: ImageReader? = null
 
     private var livePhotoBuffer: LivePhotoRingBuffer? = null
+    private var capLiveStillTo1080p = false
     private var useLivePhotoFallbackTwoSurface = false
     private var useMinimalTwoSurfaceFallback = false
+    private var cameraRecoveryAttempts = 0
+    private val livePairLinkMutex = Mutex()
+    private var captureWatchdogJob: Job? = null
 
     private var mediaRecorder: MediaRecorder? = null
     private var activeVideoOutputFile: File? = null
@@ -134,6 +144,10 @@ class CameraEngine(
     private var pauseStartMs: Long = 0L
 
     private var currentMode: CameraMode = CameraMode.PHOTO
+    private var currentProCaptureType: ProCaptureType = ProCaptureType.PHOTO
+    private var currentPortraitBokeh: Float = 0.55f
+    private var portraitFocusX: Float = 0.5f
+    private var portraitFocusY: Float = 0.42f
     private var currentSettings: HungCamSettings = HungCamSettings()
     private var currentFlash: FlashMode = FlashMode.OFF
     private var currentLiveDuration: LivePhotoDuration = LivePhotoDuration.OFF
@@ -214,11 +228,14 @@ class CameraEngine(
         flash: FlashMode,
         liveDuration: LivePhotoDuration,
         proParams: ProCameraParameters,
+        proCaptureType: ProCaptureType = ProCaptureType.PHOTO,
+        portraitBokeh: Float = 0.55f,
         timelapseSpeed: TimelapseSpeed,
         slowMoOption: SlowMoOption?
     ) {
         val lensChanged = activeLens?.cameraId != lens.cameraId || activeLens?.physicalId != lens.physicalId
         val modeChanged = currentMode != mode
+        val proTypeChanged = (mode == CameraMode.PRO) && (currentProCaptureType != proCaptureType)
         val liveChanged = (currentLiveDuration == LivePhotoDuration.OFF) != (liveDuration == LivePhotoDuration.OFF)
         val aspectChanged = currentSettings.aspectRatio != settings.aspectRatio
         val formatChanged = currentSettings.photoFormat != settings.photoFormat ||
@@ -229,31 +246,43 @@ class CameraEngine(
 
         activeLens = lens
         currentMode = mode
+        currentProCaptureType = proCaptureType
+        currentPortraitBokeh = portraitBokeh.coerceIn(0f, 1f)
         currentSettings = settings
         currentFlash = flash
-        currentLiveDuration = if (mode == CameraMode.LIVE && liveDuration == LivePhotoDuration.OFF) {
-            LivePhotoDuration.THREE_SEC
-        } else {
-            liveDuration
-        }
+        currentLiveDuration = liveDuration
         currentProParams = proParams
         currentTimelapseSpeed = timelapseSpeed
         currentSlowMoOption = slowMoOption
 
         if (lensChanged) {
+            capLiveStillTo1080p = false
             useLivePhotoFallbackTwoSurface = false
             useMinimalTwoSurfaceFallback = false
+            cameraRecoveryAttempts = 0
             currentZoomRatio = 1.0f.coerceIn(lens.minZoom, lens.maxZoom)
             _runtimeState.value = _runtimeState.value.copy(activeZoom = currentZoomRatio)
             closeCamera()
             openCameraIfReady()
-        } else if (modeChanged || liveChanged || formatChanged || aspectChanged) {
+        } else if (modeChanged || proTypeChanged || liveChanged || formatChanged || aspectChanged) {
             if (cameraDevice != null && textureView?.isAvailable == true) {
                 backgroundHandler?.post { createPreviewSession() }
             }
         } else {
             applyRepeatingRequestChanges()
         }
+    }
+
+    fun updatePortraitFocusPoint(normX: Float, normY: Float) {
+        portraitFocusX = normX.coerceIn(0.15f, 0.85f)
+        portraitFocusY = normY.coerceIn(0.15f, 0.85f)
+    }
+
+    private fun isVideoFamilyMode(): Boolean {
+        return currentMode == CameraMode.VIDEO ||
+            currentMode == CameraMode.SLOW_MOTION ||
+            currentMode == CameraMode.TIMELAPSE ||
+            (currentMode == CameraMode.PRO && currentProCaptureType == ProCaptureType.VIDEO)
     }
 
     fun setZoomRatio(zoom: Float) {
@@ -323,32 +352,79 @@ class CameraEngine(
                 withContext(Dispatchers.Main) {
                     configureTextureTransform(tv.width, tv.height)
                 }
-                cameraManager.openCamera(lens.cameraId, object : CameraDevice.StateCallback() {
-                    override fun onOpened(camera: CameraDevice) {
+                val lockReleased = java.util.concurrent.atomic.AtomicBoolean(false)
+                fun releaseOpenLockOnce() {
+                    if (lockReleased.compareAndSet(false, true)) {
                         cameraOpenCloseLock.release()
-                        cameraDevice = camera
-                        _runtimeState.value = _runtimeState.value.copy(isCameraOpen = true, errorMessage = null)
-                        backgroundHandler?.post { createPreviewSession() }
                     }
+                }
+                try {
+                    cameraManager.openCamera(lens.cameraId, object : CameraDevice.StateCallback() {
+                        override fun onOpened(camera: CameraDevice) {
+                            releaseOpenLockOnce()
+                            cameraDevice = camera
+                            _runtimeState.value = _runtimeState.value.copy(isCameraOpen = true, errorMessage = null)
+                            backgroundHandler?.post { createPreviewSession() }
+                        }
 
-                    override fun onDisconnected(camera: CameraDevice) {
-                        cameraOpenCloseLock.release()
-                        camera.close()
-                        cameraDevice = null
-                        _runtimeState.value = _runtimeState.value.copy(isCameraOpen = false, isPreviewActive = false)
-                    }
+                        override fun onDisconnected(camera: CameraDevice) {
+                            releaseOpenLockOnce()
+                            runCatching { captureSession?.close() }
+                            captureSession = null
+                            livePhotoBuffer?.stop()
+                            livePhotoBuffer = null
+                            runCatching { camera.close() }
+                            cameraDevice = null
+                            _runtimeState.value = _runtimeState.value.copy(
+                                isCameraOpen = false,
+                                isPreviewActive = false,
+                                isCapturing = false
+                            )
+                        }
 
-                    override fun onError(camera: CameraDevice, error: Int) {
-                        cameraOpenCloseLock.release()
-                        camera.close()
-                        cameraDevice = null
-                        _runtimeState.value = _runtimeState.value.copy(
-                            isCameraOpen = false,
-                            isPreviewActive = false,
-                            errorMessage = "Camera2 hardware error code $error"
-                        )
-                    }
-                }, handler)
+                        override fun onError(camera: CameraDevice, error: Int) {
+                            releaseOpenLockOnce()
+                            val hadLiveBuffer = livePhotoBuffer != null
+                            runCatching { captureSession?.close() }
+                            captureSession = null
+                            livePhotoBuffer?.stop()
+                            livePhotoBuffer = null
+                            runCatching { camera.close() }
+                            cameraDevice = null
+
+                            if (cameraRecoveryAttempts < 3 && (hadLiveBuffer || !useMinimalTwoSurfaceFallback)) {
+                                cameraRecoveryAttempts++
+                                if (hadLiveBuffer && !capLiveStillTo1080p) {
+                                    capLiveStillTo1080p = true
+                                } else if (hadLiveBuffer && !useLivePhotoFallbackTwoSurface) {
+                                    useLivePhotoFallbackTwoSurface = true
+                                } else {
+                                    useMinimalTwoSurfaceFallback = true
+                                }
+                                _runtimeState.value = _runtimeState.value.copy(
+                                    isCameraOpen = false,
+                                    isPreviewActive = false,
+                                    isCapturing = false,
+                                    livePhotoFallbackNotice = "Adjusted Camera2 stream profile (code $error)"
+                                )
+                                backgroundHandler?.postDelayed({ openCameraIfReady() }, 250L)
+                            } else {
+                                _runtimeState.value = _runtimeState.value.copy(
+                                    isCameraOpen = false,
+                                    isPreviewActive = false,
+                                    isCapturing = false,
+                                    errorMessage = "Camera2 hardware error code $error"
+                                )
+                            }
+                        }
+                    }, handler)
+                } catch (e: SecurityException) {
+                    releaseOpenLockOnce()
+                    _runtimeState.value = _runtimeState.value.copy(errorMessage = "Camera permission required")
+                } catch (e: Exception) {
+                    releaseOpenLockOnce()
+                    _runtimeState.value = _runtimeState.value.copy(errorMessage = e.localizedMessage ?: "Failed to open camera")
+                }
             } catch (e: SecurityException) {
                 cameraOpenCloseLock.release()
                 _runtimeState.value = _runtimeState.value.copy(errorMessage = "Camera permission required")
@@ -446,17 +522,28 @@ class CameraEngine(
             abs(r - desiredRatio) < 0.08f
         }.ifEmpty { allStillSizes }
 
+        val wantLivePhoto = (currentMode == CameraMode.PHOTO && currentLiveDuration != LivePhotoDuration.OFF)
+        val capStillForLiveStream = wantLivePhoto &&
+            !useLivePhotoFallbackTwoSurface &&
+            !useMinimalTwoSurfaceFallback &&
+            lens.hardwareLevelLabel != "LEGACY"
+
         val chosenStillSize = when {
-            useMinimalTwoSurfaceFallback && ratioMatchedStillSizes.isNotEmpty() -> {
+            (useMinimalTwoSurfaceFallback || capLiveStillTo1080p) && ratioMatchedStillSizes.isNotEmpty() -> {
                 ratioMatchedStillSizes.firstOrNull { it.width <= 1920 && it.height <= 1440 }
+                    ?: ratioMatchedStillSizes.last()
+            }
+            capStillForLiveStream && lens.hardwareLevelLabel == "LIMITED" && ratioMatchedStillSizes.isNotEmpty() -> {
+                ratioMatchedStillSizes.firstOrNull { it.width <= 2560 && it.height <= 1920 }
+                    ?: ratioMatchedStillSizes.last()
+            }
+            (capStillForLiveStream || currentSettings.photoResolutionTier != PhotoResolutionTier.MAX) && ratioMatchedStillSizes.isNotEmpty() -> {
+                // Keep <= 12MP (4096x3072) when Live Photo MediaCodec stream is attached to prevent 50MP/200MP HAL overflow
+                ratioMatchedStillSizes.firstOrNull { it.width <= 4096 && it.height <= 3072 }
                     ?: ratioMatchedStillSizes.last()
             }
             currentSettings.photoResolutionTier == PhotoResolutionTier.MAX && ratioMatchedStillSizes.isNotEmpty() -> {
                 ratioMatchedStillSizes.first()
-            }
-            ratioMatchedStillSizes.isNotEmpty() -> {
-                ratioMatchedStillSizes.firstOrNull { it.width <= 4096 && it.height <= 3072 }
-                    ?: ratioMatchedStillSizes.first()
             }
             else -> Size(lens.standardPhotoWidth, lens.standardPhotoHeight)
         }
@@ -466,7 +553,7 @@ class CameraEngine(
             chosenStillSize.width,
             chosenStillSize.height,
             imageFormat,
-            3
+            2
         ).apply {
             setOnImageAvailableListener({ reader ->
                 val image = runCatching { reader.acquireLatestImage() }.getOrNull() ?: return@setOnImageAvailableListener
@@ -474,10 +561,11 @@ class CameraEngine(
             }, handler)
         }
 
-        // Optional RAW_SENSOR reader in PRO mode
+        // Optional RAW_SENSOR reader in PRO Photo mode
         rawImageReader?.close()
         rawImageReader = null
         if (currentMode == CameraMode.PRO &&
+            currentProCaptureType == ProCaptureType.PHOTO &&
             currentProParams.captureRawDng &&
             lens.supportsRaw &&
             !useMinimalTwoSurfaceFallback
@@ -515,12 +603,7 @@ class CameraEngine(
         }
 
         // Live Photo rolling encoder surface (requires non-LEGACY hardware for concurrent 3-surface capture)
-        val wantLivePhoto = (currentMode == CameraMode.LIVE ||
-            (currentMode == CameraMode.PHOTO && currentLiveDuration != LivePhotoDuration.OFF))
-        val canAttachLiveSurface = wantLivePhoto &&
-            !useLivePhotoFallbackTwoSurface &&
-            !useMinimalTwoSurfaceFallback &&
-            lens.hardwareLevelLabel != "LEGACY"
+        val canAttachLiveSurface = capStillForLiveStream
 
         if (canAttachLiveSurface) {
             val codecSizes = map?.getOutputSizes(android.media.MediaCodec::class.java)?.toList().orEmpty()
@@ -559,9 +642,10 @@ class CameraEngine(
             livePhotoBuffer?.getInputSurface()?.let { surfaces.add(it) }
         }
 
-        val template = when (currentMode) {
-            CameraMode.VIDEO, CameraMode.SLOW_MOTION, CameraMode.TIMELAPSE -> CameraDevice.TEMPLATE_RECORD
-            else -> CameraDevice.TEMPLATE_PREVIEW
+        val template = if (isVideoFamilyMode()) {
+            CameraDevice.TEMPLATE_RECORD
+        } else {
+            CameraDevice.TEMPLATE_PREVIEW
         }
 
         val builder = device.createCaptureRequest(template).apply {
@@ -578,6 +662,7 @@ class CameraEngine(
             override fun onConfigured(session: CameraCaptureSession) {
                 if (cameraDevice == null) return
                 captureSession = session
+                cameraRecoveryAttempts = 0
                 val isFallback = wantLivePhoto && !canAttachLiveSurface
                 _runtimeState.value = _runtimeState.value.copy(
                     isPreviewActive = true,
@@ -590,7 +675,10 @@ class CameraEngine(
             }
 
             override fun onConfigureFailed(session: CameraCaptureSession) {
-                if (canAttachLiveSurface) {
+                if (canAttachLiveSurface && !capLiveStillTo1080p) {
+                    capLiveStillTo1080p = true
+                    handler.post { createPreviewSession() }
+                } else if (canAttachLiveSurface) {
                     useLivePhotoFallbackTwoSurface = true
                     handler.post { createPreviewSession() }
                 } else if (!useMinimalTwoSurfaceFallback) {
@@ -604,31 +692,46 @@ class CameraEngine(
             }
         }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
-            lens.physicalId != null &&
-            !useMinimalTwoSurfaceFallback
-        ) {
-            val outputConfigs = surfaces.map { surface ->
-                OutputConfiguration(surface).apply {
-                    if (surface == activePreviewSurface) {
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+                lens.physicalId != null &&
+                !useMinimalTwoSurfaceFallback
+            ) {
+                val outputConfigs = surfaces.map { surface ->
+                    OutputConfiguration(surface).apply {
                         runCatching { setPhysicalCameraId(lens.physicalId) }
                     }
                 }
+                val sessionConfig = SessionConfiguration(
+                    SessionConfiguration.SESSION_REGULAR,
+                    outputConfigs,
+                    sessionExecutor,
+                    callback
+                )
+                runCatching { device.createCaptureSession(sessionConfig) }
+                    .onFailure {
+                        @Suppress("DEPRECATION")
+                        device.createCaptureSession(surfaces, callback, handler)
+                    }
+            } else {
+                @Suppress("DEPRECATION")
+                device.createCaptureSession(surfaces, callback, handler)
             }
-            val sessionConfig = SessionConfiguration(
-                SessionConfiguration.SESSION_REGULAR,
-                outputConfigs,
-                sessionExecutor,
-                callback
-            )
-            runCatching { device.createCaptureSession(sessionConfig) }
-                .onFailure {
-                    @Suppress("DEPRECATION")
-                    device.createCaptureSession(surfaces, callback, handler)
-                }
-        } else {
-            @Suppress("DEPRECATION")
-            device.createCaptureSession(surfaces, callback, handler)
+        }.onFailure {
+            if (canAttachLiveSurface && !capLiveStillTo1080p) {
+                capLiveStillTo1080p = true
+                handler.post { createPreviewSession() }
+            } else if (canAttachLiveSurface) {
+                useLivePhotoFallbackTwoSurface = true
+                handler.post { createPreviewSession() }
+            } else if (!useMinimalTwoSurfaceFallback) {
+                useMinimalTwoSurfaceFallback = true
+                handler.post { createPreviewSession() }
+            } else {
+                _runtimeState.value = _runtimeState.value.copy(
+                    errorMessage = it.localizedMessage ?: "Failed to create Camera2 session"
+                )
+            }
         }
     }
 
@@ -636,13 +739,13 @@ class CameraEngine(
         val session = captureSession ?: return
         val builder = previewRequestBuilder ?: return
         val handler = backgroundHandler ?: return
-        applyRequestParameters(builder)
+        applyRequestParameters(builder, isStillCapture = false)
         runCatching {
             session.setRepeatingRequest(builder.build(), repeatingCaptureCallback, handler)
         }
     }
 
-    private fun applyRequestParameters(builder: CaptureRequest.Builder) {
+    private fun applyRequestParameters(builder: CaptureRequest.Builder, isStillCapture: Boolean = false) {
         val lens = activeLens ?: return
         builder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
 
@@ -687,9 +790,15 @@ class CameraEngine(
                 CaptureRequest.SENSOR_SENSITIVITY,
                 currentProParams.iso.coerceIn(lens.isoRange.first, lens.isoRange.last)
             )
+            val maxExpNs = if (isVideoFamilyMode()) {
+                min(lens.exposureTimeRangeNs.last, 1_000_000_000L / currentSettings.videoFps.coerceAtLeast(24))
+                    .coerceAtLeast(lens.exposureTimeRangeNs.first)
+            } else {
+                lens.exposureTimeRangeNs.last
+            }
             builder.set(
                 CaptureRequest.SENSOR_EXPOSURE_TIME,
-                currentProParams.exposureTimeNs.coerceIn(lens.exposureTimeRangeNs.first, lens.exposureTimeRangeNs.last)
+                currentProParams.exposureTimeNs.coerceIn(lens.exposureTimeRangeNs.first, maxExpNs)
             )
         } else {
             val aeMode = when (currentFlash) {
@@ -727,7 +836,7 @@ class CameraEngine(
                 currentProParams.focusDistance.coerceIn(0f, lens.minFocusDistance)
             )
         } else {
-            val afMode = if (currentMode == CameraMode.VIDEO || currentMode == CameraMode.TIMELAPSE) {
+            val afMode = if (isVideoFamilyMode()) {
                 CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO
             } else {
                 CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
@@ -735,13 +844,21 @@ class CameraEngine(
             builder.set(CaptureRequest.CONTROL_AF_MODE, afMode)
         }
 
-        // HDR Scene Mode when supported
-        if (currentMode == CameraMode.PHOTO && currentSettings.hdrEnabled && lens.supportsHdrScene) {
+        // HDR Scene Mode requires CONTROL_MODE_USE_SCENE_MODE; apply only on still captures without Live stream or fallback
+        if (isStillCapture &&
+            currentMode == CameraMode.PHOTO &&
+            currentSettings.hdrEnabled &&
+            lens.supportsHdrScene &&
+            livePhotoBuffer == null &&
+            !useMinimalTwoSurfaceFallback &&
+            currentFlash == FlashMode.OFF
+        ) {
+            builder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_USE_SCENE_MODE)
             builder.set(CaptureRequest.CONTROL_SCENE_MODE, CaptureRequest.CONTROL_SCENE_MODE_HDR)
         }
 
         // Video target FPS
-        if (currentMode == CameraMode.VIDEO) {
+        if (currentMode == CameraMode.VIDEO || (currentMode == CameraMode.PRO && currentProCaptureType == ProCaptureType.VIDEO)) {
             val fps = currentSettings.videoFps
             builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(fps, fps))
         }
@@ -794,35 +911,61 @@ class CameraEngine(
     }
 
     fun capturePhoto(isBurstShot: Boolean = false) {
-        val device = cameraDevice ?: return
-        val session = captureSession ?: return
-        val stillReader = stillImageReader ?: return
-        val handler = backgroundHandler ?: return
-        val lens = activeLens ?: return
+        val device = cameraDevice
+        val session = captureSession
+        val stillReader = stillImageReader
+        val handler = backgroundHandler
+        val lens = activeLens
+        if (device == null || session == null || stillReader == null || handler == null || lens == null) {
+            _runtimeState.value = _runtimeState.value.copy(
+                isCapturing = false,
+                statusBanner = "Reconnecting camera..."
+            )
+            openCameraIfReady()
+            return
+        }
 
         if (!mediaRepo.hasSufficientStorage(25L)) {
             _runtimeState.value = _runtimeState.value.copy(errorMessage = "Insufficient storage (< 25 MB free)")
             return
         }
 
-        _runtimeState.value = _runtimeState.value.copy(isCapturing = true)
+        if (_runtimeState.value.isCapturing && !isBurstShot) return
+
+        _runtimeState.value = _runtimeState.value.copy(isCapturing = true, errorMessage = null)
+        captureWatchdogJob?.cancel()
+        captureWatchdogJob = scope.launch {
+            delay(5000L)
+            if (_runtimeState.value.isCapturing) {
+                _runtimeState.value = _runtimeState.value.copy(isCapturing = false)
+            }
+        }
         val shutterMonotonicUs = SystemClock.elapsedRealtimeNanos() / 1000L
 
         val capturedOrientation = getJpegOrientation(lens)
 
-        val captureBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
-            addTarget(stillReader.surface)
-            rawImageReader?.surface?.let { addTarget(it) }
-            applyRequestParameters(this)
-            set(CaptureRequest.JPEG_ORIENTATION, capturedOrientation)
-            set(CaptureRequest.JPEG_QUALITY, 97.toByte())
-            if (currentFlash == FlashMode.ON) {
-                set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_SINGLE)
+        val captureBuilder = runCatching {
+            device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
+                addTarget(stillReader.surface)
+                rawImageReader?.surface?.let { addTarget(it) }
+                applyRequestParameters(this, isStillCapture = true)
+                set(CaptureRequest.JPEG_ORIENTATION, capturedOrientation)
+                set(CaptureRequest.JPEG_QUALITY, 97.toByte())
+                if (currentFlash == FlashMode.ON) {
+                    set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_SINGLE)
+                }
             }
+        }.getOrElse { err ->
+            captureWatchdogJob?.cancel()
+            _runtimeState.value = _runtimeState.value.copy(
+                isCapturing = false,
+                errorMessage = err.localizedMessage ?: "Failed to build still capture request"
+            )
+            return
         }
 
-        val wantLive = !isBurstShot && (currentMode == CameraMode.LIVE ||
-            (currentMode == CameraMode.PHOTO && currentLiveDuration != LivePhotoDuration.OFF))
+        val wantLive = !isBurstShot && currentMode == CameraMode.PHOTO && currentLiveDuration != LivePhotoDuration.OFF
+        val isPortraitCapture = currentMode == CameraMode.PORTRAIT
 
         val pairId = if (wantLive && livePhotoBuffer != null) UUID.randomUUID().toString() else null
         val tv = textureView
@@ -837,26 +980,45 @@ class CameraEngine(
                 } else if (isPortraitDisplay) 9f / 19.5f else 19.5f / 9f
             }
         }
-        pendingStillCaptures.add(PendingStillCaptureMeta(pairId, targetUprightAspect))
+        pendingStillCaptures.add(
+            PendingStillCaptureMeta(
+                pairId = pairId,
+                targetUprightAspect = targetUprightAspect,
+                isPortraitBokeh = isPortraitCapture,
+                portraitBokehStrength = currentPortraitBokeh,
+                portraitFocusX = portraitFocusX,
+                portraitFocusY = portraitFocusY
+            )
+        )
 
-        session.capture(captureBuilder.build(), object : CameraCaptureSession.CaptureCallback() {
-            override fun onCaptureCompleted(s: CameraCaptureSession, r: CaptureRequest, result: TotalCaptureResult) {
-                lastCaptureResult = result
-                pendingRawCaptureResult = result
-                tryFinalizeRawCapture()
-                if (pairId != null) {
-                    finalizeLivePhotoClip(pairId, shutterMonotonicUs, capturedOrientation)
+        runCatching {
+            session.capture(captureBuilder.build(), object : CameraCaptureSession.CaptureCallback() {
+                override fun onCaptureCompleted(s: CameraCaptureSession, r: CaptureRequest, result: TotalCaptureResult) {
+                    lastCaptureResult = result
+                    pendingRawCaptureResult = result
+                    tryFinalizeRawCapture()
+                    if (pairId != null) {
+                        finalizeLivePhotoClip(pairId, shutterMonotonicUs, capturedOrientation)
+                    }
                 }
-            }
 
-            override fun onCaptureFailed(s: CameraCaptureSession, r: CaptureRequest, failure: CaptureFailure) {
-                pendingStillCaptures.poll()
-                _runtimeState.value = _runtimeState.value.copy(
-                    isCapturing = false,
-                    errorMessage = "Still capture failed (reason ${failure.reason})"
-                )
-            }
-        }, handler)
+                override fun onCaptureFailed(s: CameraCaptureSession, r: CaptureRequest, failure: CaptureFailure) {
+                    pendingStillCaptures.poll()
+                    captureWatchdogJob?.cancel()
+                    _runtimeState.value = _runtimeState.value.copy(
+                        isCapturing = false,
+                        errorMessage = "Still capture failed (reason ${failure.reason})"
+                    )
+                }
+            }, handler)
+        }.onFailure { err ->
+            pendingStillCaptures.poll()
+            captureWatchdogJob?.cancel()
+            _runtimeState.value = _runtimeState.value.copy(
+                isCapturing = false,
+                errorMessage = err.localizedMessage ?: "Camera2 capture rejected"
+            )
+        }
     }
 
     private fun finalizeLivePhotoClip(pairId: String, shutterMonotonicUs: Long, orientationHint: Int) {
@@ -878,29 +1040,30 @@ class CameraEngine(
                     livePairId = pairId
                 )
                 uriRes.onSuccess { videoUri ->
-                    // Update the linked still image row if already saved, or store for pending still
-                    val db = com.example.data.HungCamDatabase.getInstance(context).mediaAssetDao()
-                    val existing = db.getByLivePairId(pairId)
-                    if (existing != null) {
-                        db.update(
-                            existing.copy(
-                                mediaType = com.example.model.MediaItemType.LIVE_PHOTO.name,
-                                liveVideoUri = videoUri.toString(),
-                                liveDurationSec = durSec,
-                                liveHasAudio = clip.hasAudio,
+                    livePairLinkMutex.withLock {
+                        val db = com.example.data.HungCamDatabase.getInstance(context).mediaAssetDao()
+                        val existing = db.getByLivePairId(pairId)
+                        if (existing != null) {
+                            db.update(
+                                existing.copy(
+                                    mediaType = com.example.model.MediaItemType.LIVE_PHOTO.name,
+                                    liveVideoUri = videoUri.toString(),
+                                    liveDurationSec = durSec,
+                                    liveHasAudio = clip.hasAudio,
+                                    shutterOffsetMs = clip.shutterOffsetMs
+                                )
+                            )
+                            _runtimeState.value = _runtimeState.value.copy(
+                                statusBanner = "Saved Live Photo (${String.format("%.1fs", clip.totalDurationMs / 1000f)})"
+                            )
+                        } else {
+                            pendingLiveClips[pairId] = PendingLiveClipMeta(
+                                videoUri = videoUri.toString(),
+                                durationSec = durSec,
+                                hasAudio = clip.hasAudio,
                                 shutterOffsetMs = clip.shutterOffsetMs
                             )
-                        )
-                        _runtimeState.value = _runtimeState.value.copy(
-                            statusBanner = "Saved Live Photo (${durSec}s)"
-                        )
-                    } else {
-                        pendingLiveClips[pairId] = PendingLiveClipMeta(
-                            videoUri = videoUri.toString(),
-                            durationSec = durSec,
-                            hasAudio = clip.hasAudio,
-                            shutterOffsetMs = clip.shutterOffsetMs
-                        )
+                        }
                     }
                 }
                 runCatching { tempFile.delete() }
@@ -910,7 +1073,6 @@ class CameraEngine(
                 )
                 runCatching { tempFile.delete() }
             }
-            _runtimeState.value = _runtimeState.value.copy(isCapturing = false)
         }
     }
 
@@ -923,7 +1085,11 @@ class CameraEngine(
 
     private data class PendingStillCaptureMeta(
         val pairId: String?,
-        val targetUprightAspect: Float
+        val targetUprightAspect: Float,
+        val isPortraitBokeh: Boolean = false,
+        val portraitBokehStrength: Float = 0.55f,
+        val portraitFocusX: Float = 0.5f,
+        val portraitFocusY: Float = 0.42f
     )
 
     private val pendingLiveClips = java.util.concurrent.ConcurrentHashMap<String, PendingLiveClipMeta>()
@@ -954,42 +1120,50 @@ class CameraEngine(
         val rawMime = if (format == ImageFormat.HEIC) "image/heic" else "image/jpeg"
 
         scope.launch(Dispatchers.IO) {
-            val cropped = if (targetUprightAspect != null && targetUprightAspect > 0f) {
-                cropStillBytesToTargetAspect(rawBytes, targetUprightAspect)
-            } else {
-                null
-            }
-            val finalBytes = cropped?.first ?: rawBytes
-            val finalW = cropped?.second ?: w
-            val finalH = cropped?.third ?: h
-            val ext = if (cropped != null) "jpg" else rawExt
-            val mime = if (cropped != null) "image/jpeg" else rawMime
-
-            val pendingMeta = queuedPairId?.let { pendingLiveClips.remove(it) }
-
-            val saveRes = mediaRepo.saveCapturedPhotoBytes(
-                bytes = finalBytes,
-                mimeType = mime,
-                extension = ext,
-                width = finalW,
-                height = finalH,
-                lensLabel = lens?.displayLabel ?: "Main",
-                iso = iso,
-                exposureTimeNs = exp,
-                focalLengthMm = lens?.focalLengthMm,
-                livePairId = queuedPairId,
-                liveVideoUri = pendingMeta?.videoUri,
-                liveDurationSec = pendingMeta?.durationSec ?: 0,
-                liveHasAudio = pendingMeta?.hasAudio ?: false,
-                shutterOffsetMs = pendingMeta?.shutterOffsetMs ?: 0L
+            val postProcessed = processStillBytesForAspectAndPortrait(
+                bytes = rawBytes,
+                targetUprightAspect = targetUprightAspect,
+                isPortraitBokeh = captureMeta?.isPortraitBokeh == true,
+                bokehStrength = captureMeta?.portraitBokehStrength ?: 0f,
+                focusX = captureMeta?.portraitFocusX ?: 0.5f,
+                focusY = captureMeta?.portraitFocusY ?: 0.42f
             )
-            saveRes.onSuccess { saved ->
+            val finalBytes = postProcessed?.first ?: rawBytes
+            val finalW = postProcessed?.second ?: w
+            val finalH = postProcessed?.third ?: h
+            val ext = if (postProcessed != null) "jpg" else rawExt
+            val mime = if (postProcessed != null) "image/jpeg" else rawMime
+            val isPortrait = captureMeta?.isPortraitBokeh == true
+
+            val saveRes = livePairLinkMutex.withLock {
+                val pendingMeta = queuedPairId?.let { pendingLiveClips.remove(it) }
+                mediaRepo.saveCapturedPhotoBytes(
+                    bytes = finalBytes,
+                    mimeType = mime,
+                    extension = ext,
+                    width = finalW,
+                    height = finalH,
+                    lensLabel = if (isPortrait) "${lens?.displayLabel ?: "Main"} • Portrait" else (lens?.displayLabel ?: "Main"),
+                    iso = iso,
+                    exposureTimeNs = exp,
+                    focalLengthMm = lens?.focalLengthMm,
+                    livePairId = queuedPairId,
+                    liveVideoUri = pendingMeta?.videoUri,
+                    liveDurationSec = pendingMeta?.durationSec ?: 0,
+                    liveHasAudio = pendingMeta?.hasAudio ?: false,
+                    shutterOffsetMs = pendingMeta?.shutterOffsetMs ?: 0L,
+                    aiTag = if (isPortrait) "Portrait Bokeh" else null
+                ) to pendingMeta
+            }
+            captureWatchdogJob?.cancel()
+            saveRes.first.onSuccess { saved ->
+                val pendingMeta = saveRes.second
                 _runtimeState.value = _runtimeState.value.copy(
                     isCapturing = false,
-                    statusBanner = if (pendingMeta != null) {
-                        "Saved Live Photo (${pendingMeta.durationSec}s)"
-                    } else {
-                        "Captured ${saved.width}x${saved.height} ${ext.uppercase()}"
+                    statusBanner = when {
+                        pendingMeta != null -> "Saved Live Photo (${pendingMeta.durationSec}s)"
+                        isPortrait -> "Saved Portrait (${saved.width}x${saved.height})"
+                        else -> "Captured ${saved.width}x${saved.height} ${ext.uppercase()}"
                     }
                 )
             }.onFailure { err ->
@@ -1001,9 +1175,13 @@ class CameraEngine(
         }
     }
 
-    private fun cropStillBytesToTargetAspect(
+    private fun processStillBytesForAspectAndPortrait(
         bytes: ByteArray,
-        targetUprightAspect: Float
+        targetUprightAspect: Float?,
+        isPortraitBokeh: Boolean,
+        bokehStrength: Float,
+        focusX: Float,
+        focusY: Float
     ): Triple<ByteArray, Int, Int>? {
         return runCatching {
             val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -1024,7 +1202,9 @@ class CameraEngine(
             val uprightW = if (swapped) bh else bw
             val uprightH = if (swapped) bw else bh
             val actualAspect = uprightW.toFloat() / uprightH.toFloat().coerceAtLeast(1f)
-            if (abs(actualAspect - targetUprightAspect) <= 0.04f) {
+            val needsAspectCrop = targetUprightAspect != null && targetUprightAspect > 0f &&
+                abs(actualAspect - targetUprightAspect) > 0.04f
+            if (!needsAspectCrop && !isPortraitBokeh) {
                 return null
             }
 
@@ -1048,15 +1228,33 @@ class CameraEngine(
                 decoded
             }
 
-            val cropped = centerCropBitmapToAspect(uprightBmp, targetUprightAspect)
-            if (cropped !== uprightBmp) uprightBmp.recycle()
+            val cropped = if (needsAspectCrop && targetUprightAspect != null) {
+                centerCropBitmapToAspect(uprightBmp, targetUprightAspect).also {
+                    if (it !== uprightBmp) uprightBmp.recycle()
+                }
+            } else {
+                uprightBmp
+            }
+
+            val finalBmp = if (isPortraitBokeh) {
+                ImageProcessor.applyPortraitBokehEffect(
+                    source = cropped,
+                    bokehStrength = bokehStrength,
+                    focusNormX = focusX,
+                    focusNormY = focusY
+                ).also {
+                    if (it !== cropped) cropped.recycle()
+                }
+            } else {
+                cropped
+            }
 
             val out = ByteArrayOutputStream()
-            cropped.compress(android.graphics.Bitmap.CompressFormat.JPEG, 96, out)
+            finalBmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 96, out)
             val outBytes = out.toByteArray()
-            val outW = cropped.width
-            val outH = cropped.height
-            cropped.recycle()
+            val outW = finalBmp.width
+            val outH = finalBmp.height
+            finalBmp.recycle()
             Triple(outBytes, outW, outH)
         }.getOrNull()
     }
@@ -1410,9 +1608,7 @@ class CameraEngine(
     private fun chooseOptimalPreviewSize(chars: CameraCharacteristics?, viewW: Int, viewH: Int): Size {
         val map = chars?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return Size(1280, 720)
         val choices = map.getOutputSizes(SurfaceTexture::class.java) ?: return Size(1280, 720)
-        val isVideoFamily = currentMode == CameraMode.VIDEO ||
-            currentMode == CameraMode.SLOW_MOTION ||
-            currentMode == CameraMode.TIMELAPSE
+        val isVideoFamily = isVideoFamilyMode()
         val targetRatio = if (isVideoFamily) {
             16f / 9f
         } else {

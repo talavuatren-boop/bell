@@ -35,6 +35,7 @@ import com.example.model.LivePhotoDuration
 import com.example.model.LiveTelemetryState
 import com.example.model.MediaItemType
 import com.example.model.ProCameraParameters
+import com.example.model.ProCaptureType
 import com.example.model.SelfTimerDuration
 import com.example.model.SlowMoOption
 import com.example.model.TimelapseSpeed
@@ -123,6 +124,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _proParams = MutableStateFlow(ProCameraParameters())
     val proParams: StateFlow<ProCameraParameters> = _proParams.asStateFlow()
+
+    private val _proCaptureType = MutableStateFlow(ProCaptureType.PHOTO)
+    val proCaptureType: StateFlow<ProCaptureType> = _proCaptureType.asStateFlow()
+
+    private val _portraitBokehStrength = MutableStateFlow(0.55f)
+    val portraitBokehStrength: StateFlow<Float> = _portraitBokehStrength.asStateFlow()
 
     private val _timelapseSpeed = MutableStateFlow(TimelapseSpeed.X5)
     val timelapseSpeed: StateFlow<TimelapseSpeed> = _timelapseSpeed.asStateFlow()
@@ -245,17 +252,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setCameraMode(mode: CameraMode) {
         if (cameraRuntime.value.isRecording) return
         _cameraMode.value = mode
-        if (mode == CameraMode.LIVE && _liveDuration.value == LivePhotoDuration.OFF) {
-            _liveDuration.value = LivePhotoDuration.THREE_SEC
+        performHapticTick()
+        syncSession()
+    }
+
+    fun setProCaptureType(type: ProCaptureType) {
+        if (cameraRuntime.value.isRecording) return
+        if (_proCaptureType.value == type) return
+        _proCaptureType.value = type
+        if (type == ProCaptureType.VIDEO && (_flashMode.value == FlashMode.AUTO || _flashMode.value == FlashMode.ON)) {
+            _flashMode.value = FlashMode.OFF
         }
         performHapticTick()
         syncSession()
     }
 
+    fun setPortraitBokehStrength(strength: Float) {
+        _portraitBokehStrength.value = strength.coerceIn(0f, 1f)
+        syncSession()
+    }
+
+    fun updatePortraitFocusPoint(normX: Float, normY: Float) {
+        cameraEngine.updatePortraitFocusPoint(normX, normY)
+    }
+
+    fun isVideoCaptureSelected(): Boolean {
+        val mode = _cameraMode.value
+        return mode == CameraMode.VIDEO ||
+            mode == CameraMode.SLOW_MOTION ||
+            mode == CameraMode.TIMELAPSE ||
+            (mode == CameraMode.PRO && _proCaptureType.value == ProCaptureType.VIDEO)
+    }
+
     fun cycleFlashMode() {
         val lens = _activeLens.value
         if (lens?.hasFlash != true) return
-        val order = if (_cameraMode.value == CameraMode.VIDEO || _cameraMode.value == CameraMode.TIMELAPSE) {
+        val order = if (isVideoCaptureSelected()) {
             listOf(FlashMode.OFF, FlashMode.TORCH)
         } else {
             listOf(FlashMode.OFF, FlashMode.AUTO, FlashMode.ON, FlashMode.TORCH)
@@ -314,8 +346,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun triggerShutterAction() {
-        val mode = _cameraMode.value
-        if (mode == CameraMode.VIDEO || mode == CameraMode.SLOW_MOTION || mode == CameraMode.TIMELAPSE) {
+        if (isVideoCaptureSelected()) {
             if (cameraRuntime.value.isRecording) {
                 cameraEngine.stopVideoRecording()
             } else {
@@ -325,7 +356,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        // Photo / PRO / Live Photo (with optional self-timer)
+        // Photo / Portrait / PRO Photo (with optional self-timer)
         if (timerJob?.isActive == true) {
             timerJob?.cancel()
             _countdownRemaining.value = 0
@@ -351,6 +382,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startBurstCapture() {
+        if (isVideoCaptureSelected()) return
         if (_cameraMode.value != CameraMode.PHOTO && _cameraMode.value != CameraMode.PRO) return
         if (burstJob?.isActive == true) return
         burstJob = viewModelScope.launch {
@@ -668,6 +700,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             flash = _flashMode.value,
             liveDuration = _liveDuration.value,
             proParams = _proParams.value,
+            proCaptureType = _proCaptureType.value,
+            portraitBokeh = _portraitBokehStrength.value,
             timelapseSpeed = _timelapseSpeed.value,
             slowMoOption = _slowMoOption.value
         )

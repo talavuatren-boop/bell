@@ -586,4 +586,140 @@ object ImageProcessor {
         return if (src.config == Bitmap.Config.ARGB_8888) src
         else src.copy(Bitmap.Config.ARGB_8888, true)
     }
+
+    /**
+     * Real computational portrait depth-of-field bokeh around a normalized focal point.
+     * Keeps the subject sharp while smoothly blending a multi-pass downsampled optical blur
+     * onto the background and adding subtle portrait micro-contrast & warmth.
+     */
+    fun applyPortraitBokehEffect(
+        source: Bitmap,
+        bokehStrength: Float = 0.6f,
+        focusNormX: Float = 0.5f,
+        focusNormY: Float = 0.42f
+    ): Bitmap {
+        val strength = bokehStrength.coerceIn(0f, 1f)
+        val w = source.width
+        val h = source.height
+        if (w < 16 || h < 16 || strength <= 0.03f) {
+            return ensureMutableBitmap(source)
+        }
+
+        // Work at capped processing size if needed while preserving high quality
+        val scaleDown = 6
+        val bw = (w / scaleDown).coerceAtLeast(16)
+        val bh = (h / scaleDown).coerceAtLeast(16)
+        val small = Bitmap.createScaledBitmap(source, bw, bh, true)
+        val radius = (3 + (strength * 9f).roundToInt()).coerceIn(3, 14)
+        val blurredSmall = fastSeparableBoxBlur(small, radius, passes = 2)
+        if (blurredSmall !== small) small.recycle()
+        val blurredFull = Bitmap.createScaledBitmap(blurredSmall, w, h, true)
+        if (blurredFull !== blurredSmall) blurredSmall.recycle()
+
+        val srcPixels = IntArray(w * h)
+        val blurPixels = IntArray(w * h)
+        source.getPixels(srcPixels, 0, w, 0, 0, w, h)
+        blurredFull.getPixels(blurPixels, 0, w, 0, 0, w, h)
+        blurredFull.recycle()
+
+        val out = IntArray(w * h)
+        val cx = focusNormX.coerceIn(0.15f, 0.85f) * w
+        val cy = focusNormY.coerceIn(0.15f, 0.85f) * h
+        // Slightly taller vertical ellipse for natural head-and-shoulders framing
+        val rx = (min(w, h) * 0.30f).coerceAtLeast(1f)
+        val ry = (max(w, h) * 0.36f).coerceAtLeast(1f)
+        val innerEdge = 0.58f
+        val outerEdge = 1.48f
+        val warmthGain = 0.04f * strength
+
+        for (y in 0 until h) {
+            val dy = (y - cy) / ry
+            val dy2 = dy * dy
+            val rowOff = y * w
+            for (x in 0 until w) {
+                val dx = (x - cx) / rx
+                val dist = sqrt(dx * dx + dy2)
+                val tRaw = ((dist - innerEdge) / (outerEdge - innerEdge)).coerceIn(0f, 1f)
+                // Smoothstep falloff multiplied by aperture bokeh strength
+                val blurBlend = (tRaw * tRaw * (3f - 2f * tRaw)) * (0.35f + 0.65f * strength)
+
+                val idx = rowOff + x
+                val sp = srcPixels[idx]
+                val bp = blurPixels[idx]
+
+                val sr = (sp shr 16) and 0xFF
+                val sg = (sp shr 8) and 0xFF
+                val sb = sp and 0xFF
+
+                val br = (bp shr 16) and 0xFF
+                val bg = (bp shr 8) and 0xFF
+                val bb = bp and 0xFF
+
+                val inv = 1f - blurBlend
+                // Gentle subject micro-glow + background depth softening
+                val rMix = (sr * inv + br * blurBlend) * (1f + warmthGain * inv)
+                val gMix = (sg * inv + bg * blurBlend) * (1f + warmthGain * 0.45f * inv)
+                val bMix = (sb * inv + bb * blurBlend) * (1f - warmthGain * 0.35f * inv)
+
+                val nr = rMix.roundToInt().coerceIn(0, 255)
+                val ng = gMix.roundToInt().coerceIn(0, 255)
+                val nb = bMix.roundToInt().coerceIn(0, 255)
+                out[idx] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
+            }
+        }
+        return Bitmap.createBitmap(out, w, h, Bitmap.Config.ARGB_8888)
+    }
+
+    private fun fastSeparableBoxBlur(src: Bitmap, radius: Int, passes: Int): Bitmap {
+        val w = src.width
+        val h = src.height
+        var cur = IntArray(w * h)
+        src.getPixels(cur, 0, w, 0, 0, w, h)
+        val tmp = IntArray(w * h)
+        val next = IntArray(w * h)
+
+        repeat(passes) {
+            // Horizontal pass
+            for (y in 0 until h) {
+                val rowOff = y * w
+                for (x in 0 until w) {
+                    var sumR = 0
+                    var sumG = 0
+                    var sumB = 0
+                    var count = 0
+                    val x0 = max(0, x - radius)
+                    val x1 = min(w - 1, x + radius)
+                    for (nx in x0..x1) {
+                        val p = cur[rowOff + nx]
+                        sumR += (p shr 16) and 0xFF
+                        sumG += (p shr 8) and 0xFF
+                        sumB += p and 0xFF
+                        count++
+                    }
+                    tmp[rowOff + x] = (0xFF shl 24) or ((sumR / count) shl 16) or ((sumG / count) shl 8) or (sumB / count)
+                }
+            }
+            // Vertical pass
+            for (y in 0 until h) {
+                val y0 = max(0, y - radius)
+                val y1 = min(h - 1, y + radius)
+                for (x in 0 until w) {
+                    var sumR = 0
+                    var sumG = 0
+                    var sumB = 0
+                    var count = 0
+                    for (ny in y0..y1) {
+                        val p = tmp[ny * w + x]
+                        sumR += (p shr 16) and 0xFF
+                        sumG += (p shr 8) and 0xFF
+                        sumB += p and 0xFF
+                        count++
+                    }
+                    next[y * w + x] = (0xFF shl 24) or ((sumR / count) shl 16) or ((sumG / count) shl 8) or (sumB / count)
+                }
+            }
+            cur = next.copyOf()
+        }
+        return Bitmap.createBitmap(cur, w, h, Bitmap.Config.ARGB_8888)
+    }
 }

@@ -140,7 +140,7 @@ fun SettingsScreen(
             )
             SettingsChipGroup(
                 label = "Default Mode",
-                items = listOf(CameraMode.PHOTO, CameraMode.PRO, CameraMode.VIDEO, CameraMode.LIVE),
+                items = listOf(CameraMode.PHOTO, CameraMode.VIDEO, CameraMode.PORTRAIT, CameraMode.PRO),
                 selected = settings.defaultCameraMode,
                 itemLabel = { it.label },
                 onSelect = { m -> viewModel.updateSettings { it.copy(defaultCameraMode = m) } }

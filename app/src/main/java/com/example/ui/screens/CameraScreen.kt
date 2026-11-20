@@ -32,7 +32,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.AspectRatio
+import androidx.compose.material.icons.filled.BlurOn
 import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.EmojiEmotions
 import androidx.compose.material.icons.filled.FlashAuto
@@ -47,8 +49,11 @@ import androidx.compose.material.icons.filled.MotionPhotosOn
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.SlowMotionVideo
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Straighten
 import androidx.compose.material.icons.filled.Timer
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -86,6 +91,7 @@ import com.example.model.AspectRatioMode
 import com.example.model.CameraMode
 import com.example.model.FlashMode
 import com.example.model.LivePhotoDuration
+import com.example.model.ProCaptureType
 import com.example.model.SelfTimerDuration
 import com.example.model.StabilizationMode
 import com.example.model.TimelapseSpeed
@@ -129,6 +135,8 @@ fun CameraScreen(
     val selfTimer by viewModel.selfTimer.collectAsStateWithLifecycle()
     val countdown by viewModel.countdownRemaining.collectAsStateWithLifecycle()
     val proParams by viewModel.proParams.collectAsStateWithLifecycle()
+    val proCaptureType by viewModel.proCaptureType.collectAsStateWithLifecycle()
+    val portraitBokeh by viewModel.portraitBokehStrength.collectAsStateWithLifecycle()
     val runtime by viewModel.cameraRuntime.collectAsStateWithLifecycle()
     val telemetry by viewModel.telemetry.collectAsStateWithLifecycle()
     val focusPeaking by viewModel.focusPeakingData.collectAsStateWithLifecycle()
@@ -176,6 +184,7 @@ fun CameraScreen(
     var focusPoint by remember { mutableStateOf<Offset?>(null) }
     var showFocusReticle by remember { mutableStateOf(false) }
     var showZoomSlider by remember { mutableStateOf(false) }
+    var showMoreModesPanel by remember { mutableStateOf(false) }
 
     LaunchedEffect(focusPoint) {
         if (focusPoint != null) {
@@ -228,12 +237,13 @@ fun CameraScreen(
             return@Box
         }
 
-        // Viewfinder container respecting orientation, video mode 16:9, and aspect ratio (4:3, 16:9, 1:1, Full-Screen)
-        val effectiveAspect = if (
-            mode == CameraMode.VIDEO ||
+        val isVideoFamilyActive = mode == CameraMode.VIDEO ||
             mode == CameraMode.SLOW_MOTION ||
-            mode == CameraMode.TIMELAPSE
-        ) {
+            mode == CameraMode.TIMELAPSE ||
+            (mode == CameraMode.PRO && proCaptureType == ProCaptureType.VIDEO)
+
+        // Viewfinder container respecting orientation, video mode 16:9, and aspect ratio (4:3, 16:9, 1:1, Full-Screen)
+        val effectiveAspect = if (isVideoFamilyActive) {
             AspectRatioMode.RATIO_16_9
         } else {
             settings.aspectRatio
@@ -267,12 +277,15 @@ fun CameraScreen(
                             }
                         }
                     }
-                    .pointerInput(Unit) {
+                    .pointerInput(mode) {
                         detectTapGestures { offset ->
                             val nx = (offset.x / size.width.toFloat()).coerceIn(0f, 1f)
                             val ny = (offset.y / size.height.toFloat()).coerceIn(0f, 1f)
                             focusPoint = Offset(nx, ny)
                             viewModel.cameraEngine.triggerTapToFocus(nx, ny)
+                            if (mode == CameraMode.PORTRAIT) {
+                                viewModel.updatePortraitFocusPoint(nx, ny)
+                            }
                             viewModel.performHapticTick()
                         }
                     }
@@ -391,7 +404,7 @@ fun CameraScreen(
                             Text("Meme", style = MonoTelemetrySmall.copy(fontSize = 10.sp), color = accent)
                         }
                     }
-                    if (mode == CameraMode.VIDEO) {
+                    if (mode == CameraMode.VIDEO || (mode == CameraMode.PRO && proCaptureType == ProCaptureType.VIDEO)) {
                         Row(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(12.dp))
@@ -437,8 +450,8 @@ fun CameraScreen(
                     )
                 }
 
-                // Live Photo Pill (OFF / 2s / 3s / 5s)
-                if (mode == CameraMode.PHOTO || mode == CameraMode.LIVE) {
+                // Live Photo Pill integrated directly into PHOTO mode (OFF / 2s / 3s / 5s)
+                if (mode == CameraMode.PHOTO) {
                     Row(
                         modifier = Modifier
                             .clip(RoundedCornerShape(16.dp))
@@ -485,13 +498,10 @@ fun CameraScreen(
                 }
 
                 // Aspect Ratio (locked to 16:9 in video modes to match hardware recording stream)
-                val isVideoFamilyMode = mode == CameraMode.VIDEO ||
-                    mode == CameraMode.SLOW_MOTION ||
-                    mode == CameraMode.TIMELAPSE
                 Row(
                     modifier = Modifier
                         .clip(RoundedCornerShape(16.dp))
-                        .clickable(enabled = !isVideoFamilyMode) { viewModel.cycleAspectRatio() }
+                        .clickable(enabled = !isVideoFamilyActive) { viewModel.cycleAspectRatio() }
                         .padding(horizontal = 8.dp, vertical = 6.dp)
                         .testTag("camera_aspect_button"),
                     verticalAlignment = Alignment.CenterVertically,
@@ -499,14 +509,14 @@ fun CameraScreen(
                 ) {
                     Icon(
                         imageVector = Icons.Default.AspectRatio,
-                        contentDescription = if (isVideoFamilyMode) "Aspect 16:9" else "Aspect ${settings.aspectRatio.label}",
-                        tint = if (isVideoFamilyMode) MutedSlate else PureWhite,
+                        contentDescription = if (isVideoFamilyActive) "Aspect 16:9" else "Aspect ${settings.aspectRatio.label}",
+                        tint = if (isVideoFamilyActive) MutedSlate else PureWhite,
                         modifier = Modifier.size(17.dp)
                     )
                     Text(
-                        text = if (isVideoFamilyMode) "16:9" else settings.aspectRatio.label,
+                        text = if (isVideoFamilyActive) "16:9" else settings.aspectRatio.label,
                         style = MonoTelemetrySmall,
-                        color = if (isVideoFamilyMode) MutedSlate else PureWhite
+                        color = if (isVideoFamilyActive) MutedSlate else PureWhite
                     )
                 }
 
@@ -543,12 +553,45 @@ fun CameraScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 if (mode == CameraMode.PRO) {
-                    LiveHistogramHud(
-                        bins = telemetry.luminanceBins,
-                        highlightClipPct = telemetry.highlightClipPercent,
-                        shadowClipPct = telemetry.shadowClipPercent,
-                        showExposureWarning = proParams.exposureWarningEnabled
-                    )
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        LiveHistogramHud(
+                            bins = telemetry.luminanceBins,
+                            highlightClipPct = telemetry.highlightClipPercent,
+                            shadowClipPct = telemetry.shadowClipPercent,
+                            showExposureWarning = proParams.exposureWarningEnabled
+                        )
+                        if (proCaptureType == ProCaptureType.VIDEO) {
+                            Text(
+                                text = "${settings.videoResolution.label}•${settings.videoFps}fps",
+                                style = MonoTelemetrySmall,
+                                color = accent,
+                                modifier = Modifier
+                                    .background(Color.Black.copy(alpha = 0.62f), RoundedCornerShape(10.dp))
+                                    .border(0.75.dp, HairlineBorder, RoundedCornerShape(10.dp))
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+                } else if (mode == CameraMode.PORTRAIT) {
+                    val fAperture = 5.6f - (portraitBokeh * 4.2f)
+                    Row(
+                        modifier = Modifier
+                            .background(Color.Black.copy(alpha = 0.62f), RoundedCornerShape(12.dp))
+                            .border(0.75.dp, accent.copy(alpha = 0.45f), RoundedCornerShape(12.dp))
+                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        Icon(Icons.Default.BlurOn, contentDescription = null, tint = accent, modifier = Modifier.size(14.dp))
+                        Text(
+                            text = String.format("BOKEH f/%.1f • Chạm lấy nét", fAperture),
+                            style = MonoTelemetrySmall,
+                            color = accent
+                        )
+                    }
                 } else if (mode == CameraMode.VIDEO) {
                     VideoQuickSpecStrip(
                         lens = activeLens,
@@ -645,7 +688,7 @@ fun CameraScreen(
                     }
                 } else {
                     Column(horizontalAlignment = Alignment.End) {
-                        if (mode == CameraMode.LIVE || (mode == CameraMode.PHOTO && liveDuration != LivePhotoDuration.OFF)) {
+                        if (mode == CameraMode.PHOTO && liveDuration != LivePhotoDuration.OFF) {
                             Text(
                                 text = "${telemetry.livePhotoBufferHealth} • ${if (settings.livePhotoSoundEnabled) "SND" else "MUTE"}",
                                 style = MonoTelemetrySmall,
@@ -697,10 +740,41 @@ fun CameraScreen(
                 ProControlDeck(
                     lens = activeLens,
                     params = proParams,
+                    captureType = proCaptureType,
+                    onSelectCaptureType = viewModel::setProCaptureType,
                     liveIso = telemetry.activeIso,
                     liveExposureNs = telemetry.activeExposureNs,
                     onUpdate = viewModel::updateProParams
                 )
+            } else if (mode == CameraMode.PORTRAIT) {
+                val fAperture = 5.6f - (portraitBokeh * 4.2f)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth(0.92f)
+                        .background(Color.Black.copy(alpha = 0.72f), RoundedCornerShape(18.dp))
+                        .border(0.75.dp, HairlineBorder, RoundedCornerShape(18.dp))
+                        .padding(horizontal = 14.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        text = String.format("f/%.1f", fAperture),
+                        style = MonoTelemetrySmall.copy(fontWeight = FontWeight.Bold),
+                        color = accent
+                    )
+                    Slider(
+                        value = portraitBokeh,
+                        onValueChange = { viewModel.setPortraitBokehStrength(it) },
+                        valueRange = 0.1f..1.0f,
+                        colors = SliderDefaults.colors(thumbColor = accent, activeTrackColor = accent),
+                        modifier = Modifier.weight(1f).testTag("portrait_bokeh_slider")
+                    )
+                    Text(
+                        text = "${(portraitBokeh * 100).toInt()}%",
+                        style = MonoTelemetrySmall,
+                        color = PureWhite
+                    )
+                }
             }
 
             // Zoom Slider (expandable on tap)
@@ -769,14 +843,74 @@ fun CameraScreen(
                 )
             }
 
-            // Camera Modes Strip
+            // Expandable "Thêm" (More Modes) Panel for PRO (Photo & Video), SLOW-MO, TIMELAPSE
+            AnimatedVisibility(visible = showMoreModesPanel && !runtime.isRecording) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color.Black.copy(alpha = 0.84f), RoundedCornerShape(18.dp))
+                        .border(1.dp, HairlineBorder, RoundedCornerShape(18.dp))
+                        .padding(horizontal = 10.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    CameraMode.extraMoreModes.forEach { extraMode ->
+                        val selected = mode == extraMode
+                        val icon = when (extraMode) {
+                            CameraMode.PRO -> Icons.Default.Tune
+                            CameraMode.SLOW_MOTION -> Icons.Default.SlowMotionVideo
+                            CameraMode.TIMELAPSE -> Icons.Default.Speed
+                            else -> Icons.Default.Apps
+                        }
+                        val sub = when (extraMode) {
+                            CameraMode.PRO -> "Ảnh & Video"
+                            CameraMode.SLOW_MOTION -> "120/240fps"
+                            CameraMode.TIMELAPSE -> "Tua nhanh"
+                            else -> ""
+                        }
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(if (selected) accent.copy(alpha = 0.18f) else ElevatedObsidian)
+                                .border(
+                                    width = if (selected) 1.dp else 0.75.dp,
+                                    color = if (selected) accent else HairlineBorder,
+                                    shape = RoundedCornerShape(14.dp)
+                                )
+                                .clickable {
+                                    viewModel.setCameraMode(extraMode)
+                                    showMoreModesPanel = false
+                                }
+                                .padding(vertical = 10.dp, horizontal = 6.dp)
+                                .testTag("more_mode_${extraMode.name.lowercase()}"),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(3.dp)
+                        ) {
+                            Icon(icon, contentDescription = extraMode.label, tint = if (selected) accent else PureWhite, modifier = Modifier.size(20.dp))
+                            Text(
+                                text = extraMode.label,
+                                style = MonoTelemetrySmall.copy(fontWeight = FontWeight.Bold),
+                                color = if (selected) accent else PureWhite
+                            )
+                            Text(
+                                text = sub,
+                                style = MonoTelemetrySmall.copy(fontSize = 9.sp),
+                                color = MutedSlate
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Streamlined Camera Modes Strip: PHOTO (with Live Photo), VIDEO, CHÂN DUNG, and THÊM
+            val isExtraModeActive = mode in CameraMode.extraMoreModes
             Row(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)
+                    .fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                CameraMode.entries.forEach { itemMode ->
+                CameraMode.primaryBarModes.forEach { itemMode ->
                     val selected = mode == itemMode
                     Text(
                         text = itemMode.label,
@@ -792,9 +926,46 @@ fun CameraScreen(
                                 if (selected) Modifier.border(0.75.dp, accent.copy(alpha = 0.45f), RoundedCornerShape(14.dp))
                                 else Modifier
                             )
-                            .clickable { viewModel.setCameraMode(itemMode) }
-                            .padding(horizontal = 10.dp, vertical = 5.dp)
+                            .clickable {
+                                showMoreModesPanel = false
+                                viewModel.setCameraMode(itemMode)
+                            }
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
                             .testTag("mode_tab_${itemMode.name.lowercase()}")
+                    )
+                }
+
+                // "Thêm" Button for PRO (Photo/Video), Slow-Mo, Timelapse
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(
+                            if (isExtraModeActive || showMoreModesPanel) accent.copy(alpha = 0.16f) else Color.Transparent
+                        )
+                        .border(
+                            0.75.dp,
+                            if (isExtraModeActive || showMoreModesPanel) accent.copy(alpha = 0.55f) else HairlineBorder,
+                            RoundedCornerShape(14.dp)
+                        )
+                        .clickable { showMoreModesPanel = !showMoreModesPanel }
+                        .padding(horizontal = 11.dp, vertical = 6.dp)
+                        .testTag("mode_tab_more"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Apps,
+                        contentDescription = "Thêm chế độ",
+                        tint = if (isExtraModeActive || showMoreModesPanel) accent else PureWhite.copy(alpha = 0.85f),
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Text(
+                        text = if (isExtraModeActive) "THÊM • ${mode.label}" else "THÊM",
+                        style = MaterialTheme.typography.labelLarge.copy(
+                            fontSize = 12.sp,
+                            fontWeight = if (isExtraModeActive) FontWeight.Bold else FontWeight.Medium
+                        ),
+                        color = if (isExtraModeActive || showMoreModesPanel) accent else PureWhite.copy(alpha = 0.85f)
                     )
                 }
             }
@@ -869,11 +1040,11 @@ fun CameraScreen(
                 }
 
                 // Center: Tactile Double-Ring Pro Shutter / Record Button
-                val isVideoFamily = mode == CameraMode.VIDEO || mode == CameraMode.SLOW_MOTION || mode == CameraMode.TIMELAPSE
+                val isVideoFamily = isVideoFamilyActive
                 val shutterScale by animateFloatAsState(if (runtime.isCapturing) 0.88f else 1f, label = "shutterScale")
                 val outerRingColor = when {
                     runtime.isRecording || isVideoFamily -> CrimsonShutter
-                    mode == CameraMode.PRO || mode == CameraMode.LIVE -> accent
+                    mode == CameraMode.PRO || mode == CameraMode.PORTRAIT -> accent
                     else -> PureWhite
                 }
 
@@ -890,15 +1061,15 @@ fun CameraScreen(
                             when {
                                 runtime.isRecording -> CrimsonShutter
                                 isVideoFamily -> CrimsonShutter
-                                mode == CameraMode.LIVE -> accent
+                                mode == CameraMode.PORTRAIT -> accent
                                 else -> PureWhite
                             }
                         )
-                        .pointerInput(mode, runtime.isRecording) {
+                        .pointerInput(mode, proCaptureType, runtime.isRecording) {
                             detectTapGestures(
                                 onTap = { viewModel.triggerShutterAction() },
                                 onLongPress = {
-                                    if (mode == CameraMode.PHOTO || mode == CameraMode.PRO) {
+                                    if ((mode == CameraMode.PHOTO || mode == CameraMode.PRO) && !isVideoFamily) {
                                         viewModel.startBurstCapture()
                                     }
                                 },
