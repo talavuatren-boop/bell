@@ -540,8 +540,10 @@ class CameraEngine(
         }
         val activePreviewSurface = getOrCreatePreviewSurface(st)
 
-        // Setup Still ImageReader (JPEG or HEIC) from actual supported sizes matching aspect ratio when available
+        val wantLivePhoto = (currentMode == CameraMode.PHOTO && currentLiveDuration != LivePhotoDuration.OFF)
+        // Always capture JPEG when Live Photo is active so MotionPhoto XMP + SEF + MP4 container packaging applies
         val imageFormat = if (
+            !wantLivePhoto &&
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
             currentSettings.photoFormat == PhotoFormat.HEIC &&
             lens.supportsHeic
@@ -564,7 +566,6 @@ class CameraEngine(
             abs(r - desiredRatio) < 0.08f
         }.ifEmpty { allStillSizes }
 
-        val wantLivePhoto = (currentMode == CameraMode.PHOTO && currentLiveDuration != LivePhotoDuration.OFF)
         val capStillForLiveStream = wantLivePhoto &&
             !useLivePhotoFallbackTwoSurface &&
             !useMinimalTwoSurfaceFallback &&
@@ -1373,8 +1374,8 @@ class CameraEngine(
                 )
                 // Safety watchdog: never leave staged still unpublished if ring buffer fails/stalls
                 scope.launch(Dispatchers.IO) {
-                    delay(12_000L)
-                    flushStagedStillAsFallback(queuedPairId, notice = null)
+                    delay(15_000L)
+                    flushStagedStillAsFallback(queuedPairId, notice = "Live Photo timeout — saved still photo")
                 }
                 return@launch
             }

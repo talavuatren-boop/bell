@@ -327,13 +327,26 @@ class LivePhotoRingBuffer(
         val alreadyElapsedMs = ((SystemClock.elapsedRealtimeNanos() / 1000L - shutterMonotonicUs) / 1000L).coerceAtLeast(0L)
         val remainingWaitMs = (postNeededMs + 280L - alreadyElapsedMs).coerceAtLeast(160L)
 
-        // Wait incrementally so if stop() is called early (e.g. user opens Viewer), we snapshot BEFORE packets are cleared
+        // Grab pre-shutter snapshot immediately and update incrementally during post-shutter window
+        // so early stop() (e.g., user opens Viewer immediately) retains valid motion packets.
         var vSnapshot: List<EncodedFrame> = emptyList()
         var aSnapshot: List<EncodedFrame> = emptyList()
         var vFmt: MediaFormat? = videoFormat
+        synchronized(videoLock) {
+            if (videoPackets.isNotEmpty()) {
+                vSnapshot = videoPackets.toList()
+                vFmt = videoFormat ?: vFmt
+            }
+        }
+        synchronized(audioLock) {
+            if (audioEnabled && audioFormat != null && audioPackets.isNotEmpty()) {
+                aSnapshot = audioPackets.toList()
+            }
+        }
         val waitEndMs = SystemClock.elapsedRealtime() + remainingWaitMs
         while (SystemClock.elapsedRealtime() < waitEndMs) {
             if (!running.get()) break
+            delay(45L)
             synchronized(videoLock) {
                 if (videoPackets.isNotEmpty()) {
                     vSnapshot = videoPackets.toList()
@@ -345,7 +358,6 @@ class LivePhotoRingBuffer(
                     aSnapshot = audioPackets.toList()
                 }
             }
-            delay(45L)
         }
 
         synchronized(videoLock) {

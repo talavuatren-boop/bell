@@ -413,7 +413,9 @@ class HungCamCoreTest {
         val packaged = com.example.processing.MotionPhotoWriter.embedMotionPhoto(
             jpegBytes = jpegWithPadding,
             mp4Bytes = fakeMp4,
-            presentationTimestampUs = 1_500_000L
+            presentationTimestampUs = 1_500_000L,
+            includeSamsungSef = false,
+            useLegacyGCameraPrefix = false
         )
         assertTrue(packaged.size > jpegBytes.size + fakeMp4.size)
         val offset = com.example.processing.MotionPhotoWriter.extractEmbeddedMp4Offset(packaged)
@@ -427,13 +429,64 @@ class HungCamCoreTest {
         assertEquals(0xD9.toByte(), packaged[mp4Start - 1])
 
         val headerStr = String(packaged, 0, minOf(packaged.size, 8192), Charsets.UTF_8)
-        assertTrue(headerStr.contains("GCamera:MotionPhoto=\"1\""))
-        assertTrue(headerStr.contains("GCamera:MicroVideo=\"1\""))
+        assertTrue(headerStr.contains("Camera:MotionPhoto=\"1\""))
+        assertTrue(headerStr.contains("Camera:MicroVideo=\"1\""))
+        assertTrue(headerStr.contains("OpCamera:MotionPhotoOwner=\"oplus\""))
+        assertTrue(headerStr.contains("OpCamera:OLivePhotoVersion=\"2\""))
+        assertTrue(headerStr.contains("OpCamera:VideoLength=\"${fakeMp4.size}\""))
         assertTrue(headerStr.contains("MiCamera:XMPMeta="))
         val secondaryBlock = headerStr.substringAfter("Item:Semantic=\"MotionPhoto\"").substringBefore("/>")
         assertTrue("Secondary MotionPhoto item must not include Item:Padding", !secondaryBlock.contains("Item:Padding"))
 
         // Standard Android JPEG decoders still decode the still image cleanly
+        val decoded = android.graphics.BitmapFactory.decodeByteArray(packaged, 0, packaged.size)
+        assertNotNull(decoded)
+        assertEquals(64, decoded.width)
+        assertEquals(48, decoded.height)
+
+        // Verify Xiaomi legacy prefix mode
+        val xiaomiPackaged = com.example.processing.MotionPhotoWriter.embedMotionPhoto(
+            jpegBytes = jpegBytes,
+            mp4Bytes = fakeMp4,
+            presentationTimestampUs = 1_000_000L,
+            includeSamsungSef = false,
+            useLegacyGCameraPrefix = true
+        )
+        val xiaomiHeader = String(xiaomiPackaged, 0, minOf(xiaomiPackaged.size, 8192), Charsets.UTF_8)
+        assertTrue(xiaomiHeader.contains("GCamera:MotionPhoto=\"1\""))
+        assertTrue(xiaomiHeader.contains("GCamera:MicroVideo=\"1\""))
+    }
+
+    @Test
+    fun `motion photo writer appends valid samsung sef MotionPhoto_Data and SEFH SEFT trailer`() {
+        val bmp = Bitmap.createBitmap(64, 48, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(android.graphics.Color.rgb(20, 80, 160))
+        }
+        val jpgStream = java.io.ByteArrayOutputStream()
+        bmp.compress(Bitmap.CompressFormat.JPEG, 90, jpgStream)
+        val jpegBytes = jpgStream.toByteArray()
+        val fakeMp4 = "ftypmp42_samsung_sef_test_payload_987654321".toByteArray()
+
+        val packaged = com.example.processing.MotionPhotoWriter.embedMotionPhoto(
+            jpegBytes = jpegBytes,
+            mp4Bytes = fakeMp4,
+            presentationTimestampUs = 900_000L,
+            includeSamsungSef = true,
+            useLegacyGCameraPrefix = false
+        )
+
+        // SEF extraction recovers exact fakeMp4 payload
+        val mp4Range = com.example.processing.MotionPhotoWriter.extractSamsungSefMp4Range(packaged)
+        assertNotNull("Expected valid Samsung SEFT/SEFH MotionPhoto_Data block", mp4Range)
+        val extracted = packaged.copyOfRange(mp4Range!!.first, mp4Range.last + 1)
+        assertTrue(extracted.contentEquals(fakeMp4))
+
+        // Google Container:Directory Item:Length = fakeMp4.size + 32 (SEF footer), so EOF - offset == mp4Range.first
+        val containerOffset = com.example.processing.MotionPhotoWriter.extractEmbeddedMp4Offset(packaged)
+        assertEquals(fakeMp4.size + 32, containerOffset)
+        assertEquals(mp4Range.first, packaged.size - containerOffset!!)
+
+        // Still JPEG image remains cleanly decodable
         val decoded = android.graphics.BitmapFactory.decodeByteArray(packaged, 0, packaged.size)
         assertNotNull(decoded)
         assertEquals(64, decoded.width)

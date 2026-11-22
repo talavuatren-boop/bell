@@ -75,7 +75,7 @@ class MediaStoreRepository(
         runCatching {
             val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
             val displayName = when {
-                livePairId != null && !isRawDng -> "MVIMG_${timestamp}.MP.$extension"
+                livePairId != null && !isRawDng -> "IMG_${timestamp}.MP.$extension"
                 aiTag != null && originalAssetId != null -> "HUNG_AI_${timestamp}.$extension"
                 else -> "HUNG_IMG_${timestamp}.$extension"
             }
@@ -435,6 +435,9 @@ class MediaStoreRepository(
         }
         if (livePairId != null) {
             exif.setAttribute(ExifInterface.TAG_IMAGE_UNIQUE_ID, livePairId)
+            if (MotionPhotoWriter.isOplusDevice()) {
+                exif.setAttribute(ExifInterface.TAG_USER_COMMENT, "oplus_8388608")
+            }
         }
         if (latitude != null && longitude != null) {
             exif.setAttribute(ExifInterface.TAG_GPS_LATITUDE, decimalToDms(latitude))
