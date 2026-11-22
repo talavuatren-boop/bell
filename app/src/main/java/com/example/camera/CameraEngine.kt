@@ -23,7 +23,6 @@ import android.hardware.camera2.params.MeteringRectangle
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.RggbChannelVector
 import android.hardware.camera2.params.SessionConfiguration
-import android.media.CamcorderProfile
 import android.media.Image
 import android.media.ImageReader
 import android.media.MediaRecorder

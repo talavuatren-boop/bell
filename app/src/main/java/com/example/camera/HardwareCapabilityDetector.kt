@@ -55,8 +55,9 @@ class HardwareCapabilityDetector(private val context: Context) {
 
         for (id in candidateIds) {
             val chars = runCatching { cameraManager.getCameraCharacteristics(id) }.getOrNull() ?: continue
-            val lensInfo = parseCameraCharacteristics(id, null, chars)
-            val isHiddenId = id !in listedSet
+            val isListed = id in listedSet
+            val lensInfo = parseCameraCharacteristics(id, null, chars, isListedLogicalCamera = isListed)
+            val isHiddenId = !isListed
             if (isHiddenId) {
                 val mp = lensInfo.maxPhotoWidth.toLong() * lensInfo.maxPhotoHeight.toLong()
                 val alreadyExists = lenses.any {
@@ -76,7 +77,7 @@ class HardwareCapabilityDetector(private val context: Context) {
                     if (lenses.none { it.cameraId == physId || it.physicalId == physId }) {
                         val physChars = runCatching { cameraManager.getCameraCharacteristics(physId) }.getOrNull()
                         if (physChars != null) {
-                            val physInfo = parseCameraCharacteristics(id, physId, physChars)
+                            val physInfo = parseCameraCharacteristics(id, physId, physChars, isListedLogicalCamera = false)
                             val physMp = physInfo.maxPhotoWidth.toLong() * physInfo.maxPhotoHeight.toLong()
                             if (physMp >= 4_000_000L) {
                                 lenses.add(physInfo)
@@ -165,7 +166,8 @@ class HardwareCapabilityDetector(private val context: Context) {
     private fun parseCameraCharacteristics(
         logicalId: String,
         physicalId: String?,
-        chars: CameraCharacteristics
+        chars: CameraCharacteristics,
+        isListedLogicalCamera: Boolean
     ): CameraLensInfo {
         val facing = chars.get(CameraCharacteristics.LENS_FACING) ?: CameraCharacteristics.LENS_FACING_BACK
         val focalLengths = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
@@ -239,7 +241,7 @@ class HardwareCapabilityDetector(private val context: Context) {
         }
 
         val fpsRanges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: emptyArray()
-        val videoProfiles = detectVideoProfiles(logicalId, hwLevel, map, fpsRanges)
+        val videoProfiles = detectVideoProfiles(logicalId, isListedLogicalCamera, hwLevel, map, fpsRanges)
         val slowMoOptions = detectSlowMoOptions(map)
 
         val displayLabel = when {
@@ -429,6 +431,7 @@ class HardwareCapabilityDetector(private val context: Context) {
 
     private fun detectVideoProfiles(
         cameraId: String,
+        isListedLogicalCamera: Boolean,
         hardwareLevel: Int,
         map: StreamConfigurationMap?,
         fpsRanges: Array<Range<Int>>
@@ -465,19 +468,26 @@ class HardwareCapabilityDetector(private val context: Context) {
                         }.getOrDefault(false))
                 }
 
-                val camcorderSupports60 = camIdInt != null && camcorderSupports60Fps(camIdInt, cameraId, preset)
                 val encoderSupports60 = (preset == VideoResolutionPreset.RES_720P || preset == VideoResolutionPreset.RES_1080P) &&
                     hardwareLevel != CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY &&
                     hwEncoderSupportsSizeAndFps(preset.width, preset.height, 60.0)
 
-                val supports60 = when (preset) {
+                val fastSupports60 = when (preset) {
                     VideoResolutionPreset.RES_720P, VideoResolutionPreset.RES_1080P -> {
-                        maxAeFps >= 60 || durationSupports60 || hsSupports60 || camcorderSupports60 || encoderSupports60
+                        maxAeFps >= 60 || durationSupports60 || hsSupports60 || encoderSupports60
                     }
                     VideoResolutionPreset.RES_4K -> {
-                        (maxAeFps >= 60 && durationSupports60) || hsSupports60 || camcorderSupports60
+                        (maxAeFps >= 60 && durationSupports60) || hsSupports60
                     }
                 }
+
+                // Only query MediaProfiles for standard listed logical cameras and only if earlier signals weren't already true,
+                // avoiding spurious E/MediaProfiles native logs on unmapped qualities/auxiliary cameras.
+                val supports60 = fastSupports60 || (
+                    isListedLogicalCamera &&
+                        camIdInt != null &&
+                        camcorderSupports60Fps(camIdInt, cameraId, preset)
+                    )
 
                 val supportedForSize = buildList {
                     if (supports24) add(24)
@@ -507,17 +517,21 @@ class HardwareCapabilityDetector(private val context: Context) {
                 VideoResolutionPreset.RES_1080P -> CamcorderProfile.QUALITY_1080P
                 VideoResolutionPreset.RES_4K -> CamcorderProfile.QUALITY_2160P
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                val hsAll = CamcorderProfile.getAll(camIdStr, hsQuality)?.videoProfiles.orEmpty()
-                if (hsAll.any { it.frameRate >= 60 }) return@runCatching true
-                val stdAll = CamcorderProfile.getAll(camIdStr, stdQuality)?.videoProfiles.orEmpty()
-                if (stdAll.any { it.frameRate >= 60 }) return@runCatching true
-            }
+
             if (CamcorderProfile.hasProfile(camIdInt, hsQuality)) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    val hsAll = CamcorderProfile.getAll(camIdStr, hsQuality)?.videoProfiles.orEmpty()
+                    if (hsAll.any { it.frameRate >= 60 }) return@runCatching true
+                }
                 val p = CamcorderProfile.get(camIdInt, hsQuality)
                 if (p.videoFrameRate >= 60) return@runCatching true
             }
+
             if (CamcorderProfile.hasProfile(camIdInt, stdQuality)) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    val stdAll = CamcorderProfile.getAll(camIdStr, stdQuality)?.videoProfiles.orEmpty()
+                    if (stdAll.any { it.frameRate >= 60 }) return@runCatching true
+                }
                 val p = CamcorderProfile.get(camIdInt, stdQuality)
                 if (p.videoFrameRate >= 60) return@runCatching true
             }
