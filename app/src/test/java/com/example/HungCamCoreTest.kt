@@ -407,9 +407,11 @@ class HungCamCoreTest {
         bmp.compress(Bitmap.CompressFormat.JPEG, 90, jpgStream)
         val jpegBytes = jpgStream.toByteArray()
         val fakeMp4 = "ftypmp42_fake_motion_clip_payload_123456".toByteArray()
+        // Append stray vendor zero-padding after JPEG EOI to verify MotionPhotoWriter trims cleanly
+        val jpegWithPadding = jpegBytes + ByteArray(64) { 0 }
 
         val packaged = com.example.processing.MotionPhotoWriter.embedMotionPhoto(
-            jpegBytes = jpegBytes,
+            jpegBytes = jpegWithPadding,
             mp4Bytes = fakeMp4,
             presentationTimestampUs = 1_500_000L
         )
@@ -417,15 +419,60 @@ class HungCamCoreTest {
         val offset = com.example.processing.MotionPhotoWriter.extractEmbeddedMp4Offset(packaged)
         assertEquals(fakeMp4.size, offset)
 
-        // Trailing bytes at end of JPEG must match MP4 byte-for-byte
-        val tail = packaged.copyOfRange(packaged.size - fakeMp4.size, packaged.size)
+        // Trailing bytes at end of JPEG must match MP4 byte-for-byte, preceded immediately by FF D9 EOI
+        val mp4Start = packaged.size - fakeMp4.size
+        val tail = packaged.copyOfRange(mp4Start, packaged.size)
         assertTrue(tail.contentEquals(fakeMp4))
+        assertEquals(0xFF.toByte(), packaged[mp4Start - 2])
+        assertEquals(0xD9.toByte(), packaged[mp4Start - 1])
+
+        val headerStr = String(packaged, 0, minOf(packaged.size, 8192), Charsets.UTF_8)
+        assertTrue(headerStr.contains("GCamera:MotionPhoto=\"1\""))
+        assertTrue(headerStr.contains("GCamera:MicroVideo=\"1\""))
+        assertTrue(headerStr.contains("MiCamera:XMPMeta="))
+        val secondaryBlock = headerStr.substringAfter("Item:Semantic=\"MotionPhoto\"").substringBefore("/>")
+        assertTrue("Secondary MotionPhoto item must not include Item:Padding", !secondaryBlock.contains("Item:Padding"))
 
         // Standard Android JPEG decoders still decode the still image cleanly
         val decoded = android.graphics.BitmapFactory.decodeByteArray(packaged, 0, packaged.size)
         assertNotNull(decoded)
         assertEquals(64, decoded.width)
         assertEquals(48, decoded.height)
+    }
+
+    @Test
+    fun `packageMotionPhotoBytes preserves exif and trailing mp4 bytes before single-pass mediastore save`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, HungCamDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        val repo = com.example.data.MediaStoreRepository(context, db.mediaAssetDao())
+
+        val bmp = Bitmap.createBitmap(64, 48, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(android.graphics.Color.rgb(90, 180, 60))
+        }
+        val jpgStream = java.io.ByteArrayOutputStream()
+        bmp.compress(Bitmap.CompressFormat.JPEG, 92, jpgStream)
+        val jpegBytes = jpgStream.toByteArray()
+        val mp4File = java.io.File(context.cacheDir, "stage_mp4_test.mp4").apply {
+            writeBytes(ByteArray(2048) { (it % 251).toByte() })
+        }
+
+        val packaged = repo.packageMotionPhotoBytes(
+            jpegBytes = jpegBytes,
+            mp4File = mp4File,
+            shutterOffsetUs = 750_000L,
+            iso = 200,
+            exposureTimeNs = 10_000_000L,
+            focalLengthMm = 5.4f,
+            livePairId = "pair-test-999"
+        )
+        assertEquals(2048, com.example.processing.MotionPhotoWriter.extractEmbeddedMp4Offset(packaged))
+        val mp4Start = packaged.size - 2048
+        assertTrue(packaged.copyOfRange(mp4Start, packaged.size).contentEquals(mp4File.readBytes()))
+
+        mp4File.delete()
+        db.close()
     }
 
     @Test

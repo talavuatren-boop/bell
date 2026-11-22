@@ -655,7 +655,17 @@ class CameraEngine(
                 .ifEmpty { map?.getOutputSizes(MediaRecorder::class.java)?.toList().orEmpty() }
             val prefer16By9 = currentSettings.aspectRatio == com.example.model.AspectRatioMode.RATIO_16_9 ||
                 currentSettings.aspectRatio == com.example.model.AspectRatioMode.FULL_SCREEN
-            val liveSize = if (prefer16By9) {
+            val liveSize = if (capLiveStillTo1080p) {
+                if (prefer16By9) {
+                    codecSizes.firstOrNull { it.width == 960 && it.height == 540 }
+                        ?: codecSizes.firstOrNull { it.width == 1280 && it.height == 720 }
+                        ?: Size(960, 540)
+                } else {
+                    codecSizes.firstOrNull { it.width == 960 && it.height == 720 }
+                        ?: codecSizes.firstOrNull { it.width == 640 && it.height == 480 }
+                        ?: Size(640, 480)
+                }
+            } else if (prefer16By9) {
                 codecSizes.firstOrNull { it.width == 1280 && it.height == 720 }
                     ?: codecSizes.firstOrNull { it.width == 1280 && it.height == 960 }
                     ?: codecSizes.firstOrNull { it.width <= 1280 && it.height <= 960 && it.width >= 640 }
@@ -1091,6 +1101,7 @@ class CameraEngine(
 
         scope.launch(Dispatchers.IO) {
             var filteredFile: File? = null
+            var stagedToDelete: File? = null
             val clipRes = ring.captureClipAroundShutter(durSec, shutterMonotonicUs, tempFile, orientationHint)
             clipRes.onSuccess { clip ->
                 val uploadFile = if (filterPreset != PhotoFilterPreset.NATURAL) {
@@ -1120,51 +1131,124 @@ class CameraEngine(
                     pairId = pairId
                 )
                 uriRes.onSuccess { videoUri ->
-                    var existingImageUri: android.net.Uri? = null
+                    var claimedStaged: PendingStagedLiveStill? = null
+                    var existingAsset: com.example.data.MediaAssetEntity? = null
+                    val db = com.example.data.HungCamDatabase.getInstance(context).mediaAssetDao()
                     livePairLinkMutex.withLock {
-                        val db = com.example.data.HungCamDatabase.getInstance(context).mediaAssetDao()
-                        val existing = db.getByLivePairId(pairId)
-                        if (existing != null) {
-                            existingImageUri = android.net.Uri.parse(existing.mediaStoreUri)
-                            db.update(
-                                existing.copy(
-                                    mediaType = com.example.model.MediaItemType.LIVE_PHOTO.name,
-                                    liveVideoUri = videoUri.toString(),
-                                    liveDurationSec = durSec,
-                                    liveHasAudio = clip.hasAudio,
+                        claimedStaged = pendingStagedLiveStills.remove(pairId)
+                        if (claimedStaged == null) {
+                            existingAsset = db.getByLivePairId(pairId)
+                            if (existingAsset == null) {
+                                pendingLiveClips[pairId] = PendingLiveClipMeta(
+                                    videoUri = videoUri.toString(),
+                                    durationSec = durSec,
+                                    hasAudio = clip.hasAudio,
                                     shutterOffsetMs = clip.shutterOffsetMs
                                 )
-                            )
-                            _runtimeState.value = _runtimeState.value.copy(
-                                statusBanner = "Saved Live Photo (${String.format("%.1fs", clip.totalDurationMs / 1000f)})"
-                            )
-                        } else {
-                            pendingLiveClips[pairId] = PendingLiveClipMeta(
-                                videoUri = videoUri.toString(),
-                                durationSec = durSec,
-                                hasAudio = clip.hasAudio,
-                                shutterOffsetMs = clip.shutterOffsetMs
-                            )
+                            }
                         }
                     }
-                    // Also embed MotionPhoto XMP + MP4 into the saved JPEG so System Gallery recognizes it as Live/Motion Photo
-                    if (existingImageUri != null) {
-                        mediaRepo.attachMotionPhotoToSavedImage(
-                            imageUri = existingImageUri!!,
+
+                    val staged = claimedStaged
+                    if (staged != null) {
+                        stagedToDelete = staged.stageJpegFile
+                        val rawJpeg = runCatching { staged.stageJpegFile.readBytes() }.getOrNull()
+                        if (rawJpeg != null && rawJpeg.isNotEmpty()) {
+                            val packagedBytes = mediaRepo.packageMotionPhotoBytes(
+                                jpegBytes = rawJpeg,
+                                mp4File = uploadFile,
+                                shutterOffsetUs = clip.shutterOffsetMs * 1000L,
+                                iso = staged.iso,
+                                exposureTimeNs = staged.exposureTimeNs,
+                                focalLengthMm = staged.focalLengthMm,
+                                livePairId = pairId
+                            )
+                            val saved = mediaRepo.saveCapturedPhotoBytes(
+                                bytes = packagedBytes,
+                                mimeType = staged.mimeType,
+                                extension = staged.extension,
+                                width = staged.width,
+                                height = staged.height,
+                                lensLabel = staged.lensLabel,
+                                iso = staged.iso,
+                                exposureTimeNs = staged.exposureTimeNs,
+                                focalLengthMm = staged.focalLengthMm,
+                                livePairId = pairId,
+                                liveVideoUri = videoUri.toString(),
+                                liveDurationSec = durSec,
+                                liveHasAudio = clip.hasAudio,
+                                shutterOffsetMs = clip.shutterOffsetMs,
+                                aiTag = staged.aiTag,
+                                deferPublishPending = false,
+                                skipExifRewrite = true
+                            )
+                            saved.onSuccess {
+                                _runtimeState.value = _runtimeState.value.copy(
+                                    statusBanner = "Saved Live Photo (${String.format("%.1fs", clip.totalDurationMs / 1000f)})"
+                                )
+                            }.onFailure { err ->
+                                _runtimeState.value = _runtimeState.value.copy(
+                                    errorMessage = err.localizedMessage
+                                )
+                            }
+                        }
+                    } else if (existingAsset != null) {
+                        val existing = existingAsset!!
+                        db.update(
+                            existing.copy(
+                                mediaType = com.example.model.MediaItemType.LIVE_PHOTO.name,
+                                liveVideoUri = videoUri.toString(),
+                                liveDurationSec = durSec,
+                                liveHasAudio = clip.hasAudio,
+                                shutterOffsetMs = clip.shutterOffsetMs
+                            )
+                        )
+                        mediaRepo.finalizeMotionPhotoAndPublish(
+                            imageUri = android.net.Uri.parse(existing.mediaStoreUri),
                             mp4File = uploadFile,
                             shutterOffsetUs = clip.shutterOffsetMs * 1000L
                         )
+                        _runtimeState.value = _runtimeState.value.copy(
+                            statusBanner = "Saved Live Photo (${String.format("%.1fs", clip.totalDurationMs / 1000f)})"
+                        )
                     }
+                }.onFailure {
+                    flushStagedStillAsFallback(pairId, notice = null)
                 }
+                runCatching { stagedToDelete?.delete() }
                 runCatching { filteredFile?.delete() }
                 runCatching { tempFile.delete() }
             }.onFailure { err ->
-                _runtimeState.value = _runtimeState.value.copy(
-                    statusBanner = "Live clip notice: ${err.message}"
-                )
+                flushStagedStillAsFallback(pairId, notice = "Live clip notice: ${err.message}")
                 runCatching { filteredFile?.delete() }
                 runCatching { tempFile.delete() }
             }
+        }
+    }
+
+    private suspend fun flushStagedStillAsFallback(pairId: String, notice: String?) {
+        val staged = livePairLinkMutex.withLock { pendingStagedLiveStills.remove(pairId) }
+        if (staged != null) {
+            val rawJpeg = runCatching { staged.stageJpegFile.readBytes() }.getOrNull()
+            runCatching { staged.stageJpegFile.delete() }
+            if (rawJpeg != null && rawJpeg.isNotEmpty()) {
+                mediaRepo.saveCapturedPhotoBytes(
+                    bytes = rawJpeg,
+                    mimeType = staged.mimeType,
+                    extension = staged.extension,
+                    width = staged.width,
+                    height = staged.height,
+                    lensLabel = staged.lensLabel,
+                    iso = staged.iso,
+                    exposureTimeNs = staged.exposureTimeNs,
+                    focalLengthMm = staged.focalLengthMm,
+                    livePairId = null,
+                    aiTag = staged.aiTag
+                )
+            }
+        }
+        if (!notice.isNullOrBlank()) {
+            _runtimeState.value = _runtimeState.value.copy(statusBanner = notice)
         }
     }
 
@@ -1173,6 +1257,19 @@ class CameraEngine(
         val durationSec: Int,
         val hasAudio: Boolean,
         val shutterOffsetMs: Long
+    )
+
+    private data class PendingStagedLiveStill(
+        val stageJpegFile: File,
+        val mimeType: String,
+        val extension: String,
+        val width: Int,
+        val height: Int,
+        val lensLabel: String,
+        val iso: Int?,
+        val exposureTimeNs: Long?,
+        val focalLengthMm: Float?,
+        val aiTag: String?
     )
 
     private data class PendingStillCaptureMeta(
@@ -1186,6 +1283,7 @@ class CameraEngine(
     )
 
     private val pendingLiveClips = java.util.concurrent.ConcurrentHashMap<String, PendingLiveClipMeta>()
+    private val pendingStagedLiveStills = java.util.concurrent.ConcurrentHashMap<String, PendingStagedLiveStill>()
     private val pendingStillCaptures = java.util.concurrent.ConcurrentLinkedQueue<PendingStillCaptureMeta>()
 
     private fun handleStillImageCaptured(image: Image, format: Int) {
@@ -1231,49 +1329,94 @@ class CameraEngine(
             val mime = if (postProcessed != null) "image/jpeg" else rawMime
             val isPortrait = captureMeta?.isPortraitBokeh == true
             val filterLabel = if (appliedFilter != PhotoFilterPreset.NATURAL) appliedFilter.label else null
+            val lensLabel = buildString {
+                append(lens?.displayLabel ?: "Main")
+                if (isPortrait) append(" • Portrait")
+                if (filterLabel != null) append(" • $filterLabel")
+            }
+            val aiTag = when {
+                isPortrait && filterLabel != null -> "Portrait • $filterLabel"
+                isPortrait -> "Portrait Bokeh"
+                filterLabel != null -> "Filter: $filterLabel"
+                else -> null
+            }
 
-            val saveRes = livePairLinkMutex.withLock {
-                val pendingMeta = queuedPairId?.let { pendingLiveClips.remove(it) }
-                mediaRepo.saveCapturedPhotoBytes(
-                    bytes = finalBytes,
-                    mimeType = mime,
-                    extension = ext,
-                    width = finalW,
-                    height = finalH,
-                    lensLabel = buildString {
-                        append(lens?.displayLabel ?: "Main")
-                        if (isPortrait) append(" • Portrait")
-                        if (filterLabel != null) append(" • $filterLabel")
-                    },
+            var readyMeta: PendingLiveClipMeta? = null
+            var stagedForClip = false
+            livePairLinkMutex.withLock {
+                readyMeta = queuedPairId?.let { pendingLiveClips.remove(it) }
+                if (queuedPairId != null && readyMeta == null && ext != "dng") {
+                    val stageFile = File(context.cacheDir, "live_stage_$queuedPairId.$ext")
+                    stageFile.writeBytes(finalBytes)
+                    pendingStagedLiveStills[queuedPairId] = PendingStagedLiveStill(
+                        stageJpegFile = stageFile,
+                        mimeType = mime,
+                        extension = ext,
+                        width = finalW,
+                        height = finalH,
+                        lensLabel = lensLabel,
+                        iso = iso,
+                        exposureTimeNs = exp,
+                        focalLengthMm = lens?.focalLengthMm,
+                        aiTag = aiTag
+                    )
+                    stagedForClip = true
+                }
+            }
+
+            captureWatchdogJob?.cancel()
+
+            if (stagedForClip && queuedPairId != null) {
+                _runtimeState.value = _runtimeState.value.copy(
+                    isCapturing = false,
+                    statusBanner = "Packaging Live Photo..."
+                )
+                // Safety watchdog: never leave staged still unpublished if ring buffer fails/stalls
+                scope.launch(Dispatchers.IO) {
+                    delay(12_000L)
+                    flushStagedStillAsFallback(queuedPairId, notice = null)
+                }
+                return@launch
+            }
+
+            val pendingMeta = readyMeta
+            val bytesToSave = if (pendingMeta != null && ext != "dng") {
+                val clipPath = android.net.Uri.parse(pendingMeta.videoUri).path
+                val mp4File = if (!clipPath.isNullOrBlank()) File(clipPath) else null
+                mediaRepo.packageMotionPhotoBytes(
+                    jpegBytes = finalBytes,
+                    mp4File = mp4File,
+                    shutterOffsetUs = pendingMeta.shutterOffsetMs * 1000L,
                     iso = iso,
                     exposureTimeNs = exp,
                     focalLengthMm = lens?.focalLengthMm,
-                    livePairId = queuedPairId,
-                    liveVideoUri = pendingMeta?.videoUri,
-                    liveDurationSec = pendingMeta?.durationSec ?: 0,
-                    liveHasAudio = pendingMeta?.hasAudio ?: false,
-                    shutterOffsetMs = pendingMeta?.shutterOffsetMs ?: 0L,
-                    aiTag = when {
-                        isPortrait && filterLabel != null -> "Portrait • $filterLabel"
-                        isPortrait -> "Portrait Bokeh"
-                        filterLabel != null -> "Filter: $filterLabel"
-                        else -> null
-                    }
-                ) to pendingMeta
+                    livePairId = queuedPairId
+                )
+            } else {
+                finalBytes
             }
-            captureWatchdogJob?.cancel()
-            saveRes.first.onSuccess { saved ->
-                val pendingMeta = saveRes.second
-                if (pendingMeta != null) {
-                    val clipPath = android.net.Uri.parse(pendingMeta.videoUri).path
-                    if (!clipPath.isNullOrBlank()) {
-                        mediaRepo.attachMotionPhotoToSavedImage(
-                            imageUri = android.net.Uri.parse(saved.mediaStoreUri),
-                            mp4File = File(clipPath),
-                            shutterOffsetUs = pendingMeta.shutterOffsetMs * 1000L
-                        )
-                    }
-                }
+
+            val savedResult = mediaRepo.saveCapturedPhotoBytes(
+                bytes = bytesToSave,
+                mimeType = mime,
+                extension = ext,
+                width = finalW,
+                height = finalH,
+                lensLabel = lensLabel,
+                iso = iso,
+                exposureTimeNs = exp,
+                focalLengthMm = lens?.focalLengthMm,
+                livePairId = queuedPairId,
+                liveVideoUri = pendingMeta?.videoUri,
+                liveDurationSec = pendingMeta?.durationSec ?: 0,
+                liveHasAudio = pendingMeta?.hasAudio ?: false,
+                shutterOffsetMs = pendingMeta?.shutterOffsetMs ?: 0L,
+                aiTag = aiTag,
+                deferPublishPending = false,
+                skipExifRewrite = pendingMeta != null && ext != "dng"
+            )
+
+            savedResult.onSuccess { saved ->
                 _runtimeState.value = _runtimeState.value.copy(
                     isCapturing = false,
                     statusBanner = when {

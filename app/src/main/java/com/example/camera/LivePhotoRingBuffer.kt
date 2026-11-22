@@ -72,20 +72,7 @@ class LivePhotoRingBuffer(
         audioEnabled = enableAudio
 
         return runCatching {
-            val vFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
-                setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-                setInteger(MediaFormat.KEY_BIT_RATE, bitrateBps)
-                setInteger(MediaFormat.KEY_FRAME_RATE, fps)
-                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O_MR1) {
-                    setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
-                }
-            }
-            val vCodec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-            vCodec.configure(vFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            val surface = vCodec.createInputSurface()
-            vCodec.start()
-
+            val (vCodec, surface) = configureVideoEncoder(bitrateBps)
             videoEncoder = vCodec
             inputSurface = surface
             videoFormat = null
@@ -95,6 +82,10 @@ class LivePhotoRingBuffer(
             }
 
             running.set(true)
+            // Request an immediate keyframe so early shutter presses still have a sync frame
+            runCatching {
+                vCodec.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) })
+            }
             videoDrainThread = Thread(::drainVideoLoop, "HungCamLiveVideo").apply { start() }
             if (enableAudio && audioEncoder != null && audioRecord != null) {
                 audioThread = Thread(::pumpAndDrainAudioLoop, "HungCamLiveAudio").apply { start() }
@@ -104,6 +95,37 @@ class LivePhotoRingBuffer(
             stop()
             false
         }
+    }
+
+    private fun configureVideoEncoder(preferredBitrate: Int): Pair<MediaCodec, Surface> {
+        val attempts = listOf(
+            Triple(preferredBitrate, true, 1),
+            Triple(minOf(preferredBitrate, 8_000_000), false, 1),
+            Triple(6_000_000, false, 1)
+        )
+        var lastError: Throwable? = null
+        for ((bps, setNoBFrames, iFrameSec) in attempts) {
+            val vCodec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+            try {
+                val vFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
+                    setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+                    setInteger(MediaFormat.KEY_BIT_RATE, bps)
+                    setInteger(MediaFormat.KEY_FRAME_RATE, fps)
+                    setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iFrameSec)
+                    if (setNoBFrames && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O_MR1) {
+                        setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
+                    }
+                }
+                vCodec.configure(vFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                val surface = vCodec.createInputSurface()
+                vCodec.start()
+                return vCodec to surface
+            } catch (t: Throwable) {
+                lastError = t
+                runCatching { vCodec.release() }
+            }
+        }
+        throw (lastError ?: IllegalStateException("Unable to configure Live Photo video encoder"))
     }
 
     @SuppressLint("MissingPermission")
@@ -287,7 +309,8 @@ class LivePhotoRingBuffer(
         outputFile: File,
         orientationHint: Int = 90
     ): Result<LiveClipResult> {
-        if (!running.get()) {
+        val hasInitialPackets = synchronized(videoLock) { videoPackets.isNotEmpty() && videoFormat != null }
+        if (!running.get() && !hasInitialPackets) {
             return Result.failure(IllegalStateException("Live Photo ring buffer is not active"))
         }
 
@@ -303,18 +326,41 @@ class LivePhotoRingBuffer(
         val postNeededMs = (targetMs - preAvailableMs).coerceIn(halfWindowMs, targetMs)
         val alreadyElapsedMs = ((SystemClock.elapsedRealtimeNanos() / 1000L - shutterMonotonicUs) / 1000L).coerceAtLeast(0L)
         val remainingWaitMs = (postNeededMs + 280L - alreadyElapsedMs).coerceAtLeast(160L)
-        delay(remainingWaitMs)
 
-        val vSnapshot: List<EncodedFrame>
+        // Wait incrementally so if stop() is called early (e.g. user opens Viewer), we snapshot BEFORE packets are cleared
+        var vSnapshot: List<EncodedFrame> = emptyList()
+        var aSnapshot: List<EncodedFrame> = emptyList()
+        var vFmt: MediaFormat? = videoFormat
+        val waitEndMs = SystemClock.elapsedRealtime() + remainingWaitMs
+        while (SystemClock.elapsedRealtime() < waitEndMs) {
+            if (!running.get()) break
+            synchronized(videoLock) {
+                if (videoPackets.isNotEmpty()) {
+                    vSnapshot = videoPackets.toList()
+                    vFmt = videoFormat ?: vFmt
+                }
+            }
+            synchronized(audioLock) {
+                if (audioEnabled && audioFormat != null && audioPackets.isNotEmpty()) {
+                    aSnapshot = audioPackets.toList()
+                }
+            }
+            delay(45L)
+        }
+
         synchronized(videoLock) {
-            vSnapshot = videoPackets.toList()
+            if (videoPackets.isNotEmpty()) {
+                vSnapshot = videoPackets.toList()
+                vFmt = videoFormat ?: vFmt
+            }
         }
-        val aSnapshot: List<EncodedFrame>
         synchronized(audioLock) {
-            aSnapshot = if (audioEnabled && audioFormat != null) audioPackets.toList() else emptyList()
+            if (audioEnabled && audioFormat != null && audioPackets.isNotEmpty()) {
+                aSnapshot = audioPackets.toList()
+            }
         }
 
-        val vFmt = videoFormat ?: return Result.failure(IllegalStateException("Video format unavailable"))
+        val resolvedVFmt = vFmt ?: return Result.failure(IllegalStateException("Video format unavailable"))
         if (vSnapshot.isEmpty()) {
             return Result.failure(IllegalStateException("No buffered frames available"))
         }
@@ -334,7 +380,7 @@ class LivePhotoRingBuffer(
 
         return runCatching {
             val muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-            val vTrack = muxer.addTrack(vFmt)
+            val vTrack = muxer.addTrack(resolvedVFmt)
             val aFmt = audioFormat
             val selectedAudio = if (aFmt != null && aSnapshot.isNotEmpty()) {
                 aSnapshot.filter { it.wallTimeUs in firstWallUs..(selectedVideo.last().wallTimeUs + 60_000L) }

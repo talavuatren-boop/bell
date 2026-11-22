@@ -7,6 +7,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.media.ExifInterface
 import android.media.MediaMetadataRetriever
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -64,26 +65,37 @@ class MediaStoreRepository(
         aiTag: String? = null,
         originalAssetId: Long? = null,
         latitude: Double? = null,
-        longitude: Double? = null
+        longitude: Double? = null,
+        deferPublishPending: Boolean = false,
+        skipExifRewrite: Boolean = false
     ): Result<MediaAssetEntity> = withContext(Dispatchers.IO) {
         if (!hasSufficientStorage(25L)) {
             return@withContext Result.failure(IllegalStateException("Insufficient storage space (< 25 MB free)"))
         }
         runCatching {
             val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
-            val prefix = if (aiTag != null) "HUNG_AI_" else if (livePairId != null) "HUNG_LIVE_" else "HUNG_IMG_"
-            val displayName = "$prefix$timestamp.$extension"
+            val displayName = when {
+                livePairId != null && !isRawDng -> "MVIMG_${timestamp}.MP.$extension"
+                aiTag != null && originalAssetId != null -> "HUNG_AI_${timestamp}.$extension"
+                else -> "HUNG_IMG_${timestamp}.$extension"
+            }
+
+            val nowMs = System.currentTimeMillis()
+            val relPath = when {
+                originalAssetId != null || (aiTag != null && livePairId == null && aiTag.contains("AI", ignoreCase = true)) ->
+                    "${Environment.DIRECTORY_PICTURES}/HUNG CAM/Enhanced"
+                else -> "${Environment.DIRECTORY_DCIM}/HUNG CAM"
+            }
 
             val values = ContentValues().apply {
                 put(MediaStore.Images.Media.DISPLAY_NAME, displayName)
                 put(MediaStore.Images.Media.MIME_TYPE, mimeType)
-                put(MediaStore.Images.Media.DATE_TAKEN, System.currentTimeMillis())
+                put(MediaStore.Images.Media.DATE_TAKEN, nowMs)
+                put(MediaStore.Images.Media.DATE_ADDED, nowMs / 1000L)
+                put(MediaStore.Images.Media.DATE_MODIFIED, nowMs / 1000L)
+                put(MediaStore.Images.Media.SIZE, bytes.size.toLong())
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    put(
-                        MediaStore.Images.Media.RELATIVE_PATH,
-                        if (aiTag != null) "${Environment.DIRECTORY_PICTURES}/HUNG CAM/Enhanced"
-                        else "${Environment.DIRECTORY_PICTURES}/HUNG CAM"
-                    )
+                    put(MediaStore.Images.Media.RELATIVE_PATH, relPath)
                     put(MediaStore.Images.Media.IS_PENDING, 1)
                 }
             }
@@ -98,41 +110,32 @@ class MediaStoreRepository(
                 ?: throw IllegalStateException("Failed to create MediaStore image entry")
 
             try {
-                resolver.openOutputStream(uri)?.use { out ->
+                resolver.openOutputStream(uri, "w")?.use { out ->
                     out.write(bytes)
                     out.flush()
                 } ?: throw IllegalStateException("Failed to open output stream for $uri")
 
-                // Preserve / write EXIF metadata for JPEG/HEIC
-                if (!isRawDng && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                // Preserve / write EXIF metadata for standard JPEG/HEIC BEFORE publishing.
+                // Never run ExifInterface on a packaged Motion Photo (it strips trailing MP4 data).
+                if (!skipExifRewrite && !isRawDng && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                     runCatching {
                         resolver.openFileDescriptor(uri, "rw")?.use { pfd ->
                             val exif = ExifInterface(pfd.fileDescriptor)
-                            if (iso != null) exif.setAttribute(ExifInterface.TAG_ISO_SPEED_RATINGS, iso.toString())
-                            if (exposureTimeNs != null) {
-                                exif.setAttribute(ExifInterface.TAG_EXPOSURE_TIME, (exposureTimeNs / 1_000_000_000.0).toString())
-                            }
-                            if (focalLengthMm != null) {
-                                val num = (focalLengthMm * 100).toInt()
-                                exif.setAttribute(ExifInterface.TAG_FOCAL_LENGTH, "$num/100")
-                            }
-                            if (livePairId != null) {
-                                exif.setAttribute(ExifInterface.TAG_IMAGE_UNIQUE_ID, livePairId)
-                            }
-                            if (latitude != null && longitude != null) {
-                                exif.setAttribute(ExifInterface.TAG_GPS_LATITUDE, decimalToDms(latitude))
-                                exif.setAttribute(ExifInterface.TAG_GPS_LATITUDE_REF, if (latitude >= 0) "N" else "S")
-                                exif.setAttribute(ExifInterface.TAG_GPS_LONGITUDE, decimalToDms(longitude))
-                                exif.setAttribute(ExifInterface.TAG_GPS_LONGITUDE_REF, if (longitude >= 0) "E" else "W")
-                            }
+                            applyExifAttributes(exif, iso, exposureTimeNs, focalLengthMm, livePairId, latitude, longitude)
                             exif.saveAttributes()
                         }
                     }
                 }
 
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    val publish = ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && !deferPublishPending) {
+                    val publish = ContentValues().apply {
+                        put(MediaStore.Images.Media.IS_PENDING, 0)
+                        put(MediaStore.Images.Media.DATE_MODIFIED, System.currentTimeMillis() / 1000L)
+                    }
                     resolver.update(uri, publish, null, null)
+                }
+                if (!deferPublishPending) {
+                    notifyMediaScanner(uri, mimeType)
                 }
             } catch (t: Throwable) {
                 runCatching { resolver.delete(uri, null, null) }
@@ -242,15 +245,20 @@ class MediaStoreRepository(
                 else -> "HUNG_VID_"
             }
             val displayName = "$prefix$timestamp.mp4"
+            val nowMs = System.currentTimeMillis()
+            val fileLen = sourceFile.length()
             val values = ContentValues().apply {
                 put(MediaStore.Video.Media.DISPLAY_NAME, displayName)
                 put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-                put(MediaStore.Video.Media.DATE_TAKEN, System.currentTimeMillis())
+                put(MediaStore.Video.Media.DATE_TAKEN, nowMs)
+                put(MediaStore.Video.Media.DATE_ADDED, nowMs / 1000L)
+                put(MediaStore.Video.Media.DATE_MODIFIED, nowMs / 1000L)
+                if (fileLen > 0L) put(MediaStore.Video.Media.SIZE, fileLen)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     val subDir = when {
                         isLiveCompanion -> "${Environment.DIRECTORY_MOVIES}/HUNG CAM/LiveClips"
-                        aiTag != null -> "${Environment.DIRECTORY_MOVIES}/HUNG CAM/Enhanced"
-                        else -> "${Environment.DIRECTORY_MOVIES}/HUNG CAM"
+                        aiTag != null && originalAssetId != null -> "${Environment.DIRECTORY_MOVIES}/HUNG CAM/Enhanced"
+                        else -> "${Environment.DIRECTORY_DCIM}/HUNG CAM"
                     }
                     put(MediaStore.Video.Media.RELATIVE_PATH, subDir)
                     put(MediaStore.Video.Media.IS_PENDING, 1)
@@ -267,7 +275,7 @@ class MediaStoreRepository(
                 ?: throw IllegalStateException("Failed to create MediaStore video entry")
 
             try {
-                resolver.openOutputStream(uri)?.use { out ->
+                resolver.openOutputStream(uri, "w")?.use { out ->
                     FileInputStream(sourceFile).use { input ->
                         input.copyTo(out, bufferSize = 64 * 1024)
                     }
@@ -275,8 +283,17 @@ class MediaStoreRepository(
                 } ?: throw IllegalStateException("Failed to write video output stream")
 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    resolver.update(uri, ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }, null, null)
+                    resolver.update(
+                        uri,
+                        ContentValues().apply {
+                            put(MediaStore.Video.Media.IS_PENDING, 0)
+                            put(MediaStore.Video.Media.DATE_MODIFIED, System.currentTimeMillis() / 1000L)
+                        },
+                        null,
+                        null
+                    )
                 }
+                notifyMediaScanner(uri, "video/mp4")
             } catch (t: Throwable) {
                 runCatching { resolver.delete(uri, null, null) }
                 throw t
@@ -333,67 +350,196 @@ class MediaStoreRepository(
     }
 
     /**
-     * Packages the saved JPEG in MediaStore.Images with standard Motion Photo XMP +
-     * appended MP4 stream so the device gallery treats it as a single Live / Motion Photo
-     * rather than a video file.
+     * Writes EXIF metadata into a local cache JPEG and packages the complete Android/Xiaomi/Google
+     * Motion Photo byte payload BEFORE a single-pass atomic insert into MediaStore.Images.Media.
      */
+    suspend fun packageMotionPhotoBytes(
+        jpegBytes: ByteArray,
+        mp4File: File?,
+        shutterOffsetUs: Long,
+        iso: Int?,
+        exposureTimeNs: Long?,
+        focalLengthMm: Float?,
+        livePairId: String?,
+        latitude: Double? = null,
+        longitude: Double? = null
+    ): ByteArray = withContext(Dispatchers.IO) {
+        val jpegWithExif = prepareExifOnJpegBytes(
+            bytes = jpegBytes,
+            iso = iso,
+            exposureTimeNs = exposureTimeNs,
+            focalLengthMm = focalLengthMm,
+            livePairId = livePairId,
+            latitude = latitude,
+            longitude = longitude
+        )
+        if (mp4File == null || !mp4File.exists() || mp4File.length() <= 1024L || mp4File.length() > 64L * 1024L * 1024L) {
+            return@withContext jpegWithExif
+        }
+        val mp4DurUs = readLocalVideoDurationUs(mp4File)
+        val clampedTsUs = if (mp4DurUs > 0L) {
+            shutterOffsetUs.coerceIn(0L, (mp4DurUs - 10_000L).coerceAtLeast(0L))
+        } else {
+            shutterOffsetUs.coerceAtLeast(0L)
+        }
+        val mp4Bytes = runCatching { mp4File.readBytes() }.getOrNull() ?: return@withContext jpegWithExif
+        if (mp4Bytes.isEmpty()) return@withContext jpegWithExif
+        MotionPhotoWriter.embedMotionPhoto(
+            jpegBytes = jpegWithExif,
+            mp4Bytes = mp4Bytes,
+            presentationTimestampUs = clampedTsUs
+        )
+    }
+
+    private fun prepareExifOnJpegBytes(
+        bytes: ByteArray,
+        iso: Int?,
+        exposureTimeNs: Long?,
+        focalLengthMm: Float?,
+        livePairId: String?,
+        latitude: Double?,
+        longitude: Double?
+    ): ByteArray {
+        val temp = File(context.cacheDir, "exif_stage_${UUID.randomUUID()}.jpg")
+        return try {
+            temp.writeBytes(bytes)
+            runCatching {
+                val exif = ExifInterface(temp.absolutePath)
+                applyExifAttributes(exif, iso, exposureTimeNs, focalLengthMm, livePairId, latitude, longitude)
+                exif.saveAttributes()
+            }
+            temp.readBytes()
+        } catch (_: Throwable) {
+            bytes
+        } finally {
+            runCatching { temp.delete() }
+        }
+    }
+
+    private fun applyExifAttributes(
+        exif: ExifInterface,
+        iso: Int?,
+        exposureTimeNs: Long?,
+        focalLengthMm: Float?,
+        livePairId: String?,
+        latitude: Double?,
+        longitude: Double?
+    ) {
+        if (iso != null) exif.setAttribute(ExifInterface.TAG_ISO_SPEED_RATINGS, iso.toString())
+        if (exposureTimeNs != null) {
+            exif.setAttribute(ExifInterface.TAG_EXPOSURE_TIME, (exposureTimeNs / 1_000_000_000.0).toString())
+        }
+        if (focalLengthMm != null) {
+            val num = (focalLengthMm * 100).toInt()
+            exif.setAttribute(ExifInterface.TAG_FOCAL_LENGTH, "$num/100")
+        }
+        if (livePairId != null) {
+            exif.setAttribute(ExifInterface.TAG_IMAGE_UNIQUE_ID, livePairId)
+        }
+        if (latitude != null && longitude != null) {
+            exif.setAttribute(ExifInterface.TAG_GPS_LATITUDE, decimalToDms(latitude))
+            exif.setAttribute(ExifInterface.TAG_GPS_LATITUDE_REF, if (latitude >= 0) "N" else "S")
+            exif.setAttribute(ExifInterface.TAG_GPS_LONGITUDE, decimalToDms(longitude))
+            exif.setAttribute(ExifInterface.TAG_GPS_LONGITUDE_REF, if (longitude >= 0) "E" else "W")
+        }
+    }
+
+    private fun readLocalVideoDurationUs(file: File): Long {
+        return runCatching {
+            val r = MediaMetadataRetriever()
+            r.setDataSource(file.absolutePath)
+            val ms = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+            r.release()
+            ms * 1000L
+        }.getOrDefault(0L)
+    }
+
+    private fun notifyMediaScanner(uri: Uri, mimeType: String) {
+        runCatching {
+            val cols = arrayOf(MediaStore.MediaColumns.DATA)
+            resolver.query(uri, cols, null, null, null)?.use { c ->
+                if (c.moveToFirst()) {
+                    val idx = c.getColumnIndex(MediaStore.MediaColumns.DATA)
+                    val path = if (idx >= 0) c.getString(idx) else null
+                    if (!path.isNullOrBlank()) {
+                        MediaScannerConnection.scanFile(context, arrayOf(path), arrayOf(mimeType), null)
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Fallback updater if a pending MediaStore entry was already created beforehand: rewrites
+     * via plain `"w"` mode (never `"rwt"`/`"wt"` which fail on Android Scoped Storage FUSE), updates
+     * SIZE, and clears IS_PENDING = 0.
+     */
+    suspend fun finalizeMotionPhotoAndPublish(
+        imageUri: Uri,
+        mp4File: File?,
+        shutterOffsetUs: Long
+    ): Boolean = withContext(Dispatchers.IO) {
+        var embedded = false
+        if (mp4File != null && mp4File.exists() && mp4File.length() > 1024L && mp4File.length() <= 64L * 1024L * 1024L) {
+            runCatching {
+                val jpegBytes = resolver.openInputStream(imageUri)?.use { it.readBytes() }
+                val mp4Bytes = mp4File.readBytes()
+                if (jpegBytes != null && mp4Bytes.isNotEmpty()) {
+                    val durUs = readLocalVideoDurationUs(mp4File)
+                    val safeTs = if (durUs > 0L) shutterOffsetUs.coerceIn(0L, (durUs - 10_000L).coerceAtLeast(0L)) else shutterOffsetUs.coerceAtLeast(0L)
+                    val motionPhotoBytes = MotionPhotoWriter.embedMotionPhoto(
+                        jpegBytes = jpegBytes,
+                        mp4Bytes = mp4Bytes,
+                        presentationTimestampUs = safeTs
+                    )
+                    if (motionPhotoBytes.size > jpegBytes.size) {
+                        embedded = resolver.openOutputStream(imageUri, "w")?.use { out ->
+                            out.write(motionPhotoBytes)
+                            out.flush()
+                            true
+                        } ?: false
+                        if (embedded && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                            runCatching {
+                                resolver.update(
+                                    imageUri,
+                                    ContentValues().apply {
+                                        put(MediaStore.Images.Media.SIZE, motionPhotoBytes.size.toLong())
+                                    },
+                                    null,
+                                    null
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        publishPendingImage(imageUri)
+        notifyMediaScanner(imageUri, "image/jpeg")
+        embedded
+    }
+
+    suspend fun publishPendingImage(imageUri: Uri) = withContext(Dispatchers.IO) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            runCatching {
+                resolver.update(
+                    imageUri,
+                    ContentValues().apply {
+                        put(MediaStore.Images.Media.IS_PENDING, 0)
+                        put(MediaStore.Images.Media.DATE_MODIFIED, System.currentTimeMillis() / 1000L)
+                    },
+                    null,
+                    null
+                )
+            }
+        }
+    }
+
     suspend fun attachMotionPhotoToSavedImage(
         imageUri: Uri,
         mp4File: File,
         shutterOffsetUs: Long
-    ): Boolean = withContext(Dispatchers.IO) {
-        if (!mp4File.exists() || mp4File.length() <= 1024L || mp4File.length() > 64L * 1024L * 1024L) {
-            return@withContext false
-        }
-        runCatching {
-            val jpegBytes = resolver.openInputStream(imageUri)?.use { it.readBytes() } ?: return@withContext false
-            val mp4Bytes = mp4File.readBytes()
-            val motionPhotoBytes = MotionPhotoWriter.embedMotionPhoto(
-                jpegBytes = jpegBytes,
-                mp4Bytes = mp4Bytes,
-                presentationTimestampUs = shutterOffsetUs
-            )
-            if (motionPhotoBytes.size <= jpegBytes.size) return@withContext false
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                runCatching {
-                    resolver.update(
-                        imageUri,
-                        ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 1) },
-                        null,
-                        null
-                    )
-                }
-            }
-            val written = try {
-                resolver.openFileDescriptor(imageUri, "rwt")?.use { pfd ->
-                    java.io.FileOutputStream(pfd.fileDescriptor).use { out ->
-                        out.write(motionPhotoBytes)
-                        out.flush()
-                    }
-                    true
-                } ?: false
-            } catch (_: Throwable) {
-                resolver.openOutputStream(imageUri, "wt")?.use { out ->
-                    out.write(motionPhotoBytes)
-                    out.flush()
-                    true
-                } ?: false
-            } finally {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    runCatching {
-                        resolver.update(
-                            imageUri,
-                            ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) },
-                            null,
-                            null
-                        )
-                    }
-                }
-            }
-            written
-        }.getOrDefault(false)
-    }
+    ): Boolean = finalizeMotionPhotoAndPublish(imageUri, mp4File, shutterOffsetUs)
 
     suspend fun importExternalMediaUri(uri: Uri): Result<MediaAssetEntity> = withContext(Dispatchers.IO) {
         runCatching {

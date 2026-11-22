@@ -413,12 +413,12 @@ class VideoProcessor(private val context: Context) {
         val surfaceTexture = android.graphics.SurfaceTexture(oesTexId)
         val frameSync = Object()
         var frameReady = false
-        surfaceTexture.setOnFrameAvailableListener {
+        surfaceTexture.setOnFrameAvailableListener({
             synchronized(frameSync) {
                 frameReady = true
                 frameSync.notifyAll()
             }
-        }
+        }, android.os.Handler(android.os.Looper.getMainLooper()))
         val decOutputSurface = android.view.Surface(surfaceTexture)
         val decoder = MediaCodec.createDecoderByType(videoMime)
         // Strip KEY_ROTATION before passing to decoder when we preserve coded stream + muxer.setOrientationHint
