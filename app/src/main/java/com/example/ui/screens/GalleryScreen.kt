@@ -28,6 +28,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.DeleteOutline
@@ -37,6 +38,7 @@ import androidx.compose.material.icons.filled.MotionPhotosOn
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PlayCircleOutline
 import androidx.compose.material.icons.filled.RestoreFromTrash
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -84,6 +86,7 @@ fun GalleryScreen(
     viewModel: MainViewModel,
     onOpenViewer: (List<MediaAssetEntity>, Int) -> Unit,
     onGoToCamera: () -> Unit,
+    onOpenSettings: () -> Unit = {},
     onOpenVideoMerge: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
@@ -127,17 +130,35 @@ fun GalleryScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column {
-                Text(
-                    text = "Gallery",
-                    style = MaterialTheme.typography.headlineMedium,
-                    color = PureWhite
-                )
-                Text(
-                    text = "${displayed.size} items • ${category.label}",
-                    style = MonoTelemetrySmall,
-                    color = MutedSlate
-                )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                SpringIconButton(
+                    onClick = onGoToCamera,
+                    modifier = Modifier
+                        .background(ElevatedObsidian, CircleShape)
+                        .border(1.dp, HairlineBorder, CircleShape)
+                        .testTag("gallery_back_camera_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Quay lại Camera",
+                        tint = PureWhite
+                    )
+                }
+                Column {
+                    Text(
+                        text = "Thư viện",
+                        style = MaterialTheme.typography.headlineMedium,
+                        color = PureWhite
+                    )
+                    Text(
+                        text = "${displayed.size} mục • ${category.label}",
+                        style = MonoTelemetrySmall,
+                        color = MutedSlate
+                    )
+                }
             }
             Row(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -171,6 +192,19 @@ fun GalleryScreen(
                         imageVector = Icons.Default.AddPhotoAlternate,
                         contentDescription = "Import from Photo Picker",
                         tint = accent
+                    )
+                }
+                SpringIconButton(
+                    onClick = onOpenSettings,
+                    modifier = Modifier
+                        .background(ElevatedObsidian, CircleShape)
+                        .border(1.dp, HairlineBorder, CircleShape)
+                        .testTag("gallery_settings_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Settings,
+                        contentDescription = "Cài đặt",
+                        tint = PureWhite
                     )
                 }
             }

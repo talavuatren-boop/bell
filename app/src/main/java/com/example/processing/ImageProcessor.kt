@@ -348,7 +348,7 @@ object ImageProcessor {
 
         // 3. Filter + ColorMatrix pass (Exposure, Brightness, Contrast, Saturation)
         val cm = ColorMatrix()
-        applyFilterPreset(cm, adj.filter)
+        applyFilterPreset(cm, adj.filter, adj.filterIntensity)
 
         val satMatrix = ColorMatrix().apply { setSaturation(adj.saturation) }
         cm.postConcat(satMatrix)
@@ -529,13 +529,17 @@ object ImageProcessor {
         return Bitmap.createBitmap(pixels, w, h, Bitmap.Config.ARGB_8888)
     }
 
-    fun buildFilterColorMatrix(preset: PhotoFilterPreset): ColorMatrix {
-        return ColorMatrix().also { applyFilterPreset(it, preset) }
+    fun buildFilterColorMatrix(preset: PhotoFilterPreset, intensity: Float = 1f): ColorMatrix {
+        return ColorMatrix().also { applyFilterPreset(it, preset, intensity) }
     }
 
-    fun applyFilterToBitmap(source: Bitmap, preset: PhotoFilterPreset): Bitmap {
-        if (preset == PhotoFilterPreset.NATURAL) return source
-        val cm = buildFilterColorMatrix(preset)
+    fun applyFilterToBitmap(
+        source: Bitmap,
+        preset: PhotoFilterPreset,
+        intensity: Float = 1f
+    ): Bitmap {
+        if (preset == PhotoFilterPreset.NATURAL || intensity <= 0.01f) return source
+        val cm = buildFilterColorMatrix(preset, intensity)
         val out = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
         Canvas(out).drawBitmap(
             source,
@@ -548,19 +552,236 @@ object ImageProcessor {
         return out
     }
 
-    private fun applyFilterPreset(cm: ColorMatrix, preset: PhotoFilterPreset) {
+    /**
+     * Enhances base camera photos ("màu gốc đẹp") with clean flagship tonal dynamics:
+     * subtle micro-contrast S-curve LUT + highlight roll-off + skin-protecting vibrance.
+     */
+    fun applyFlagshipNaturalTone(source: Bitmap): Bitmap {
+        val w = source.width
+        val h = source.height
+        if (w < 4 || h < 4) return ensureMutableBitmap(source)
+
+        val lut = IntArray(256) { v ->
+            val x = v / 255f
+            // Gentle shadow clarity + crisp midtone pop + smooth highlight preservation
+            val curved = (x * x * (3f - 2f * x)) * 0.16f + x * 0.84f
+            val lift = (curved + 0.014f * (1f - x)).coerceIn(0f, 1f)
+            (lift * 255f).roundToInt().coerceIn(0, 255)
+        }
+
+        val pixels = IntArray(w * h)
+        source.getPixels(pixels, 0, w, 0, 0, w, h)
+        for (i in pixels.indices) {
+            val p = pixels[i]
+            val r0 = lut[(p shr 16) and 0xFF].toFloat()
+            val g0 = lut[(p shr 8) and 0xFF].toFloat()
+            val b0 = lut[p and 0xFF].toFloat()
+
+            val maxC = max(r0, max(g0, b0))
+            val minC = min(r0, min(g0, b0))
+            val sat = if (maxC > 1f) (maxC - minC) / maxC else 0f
+            val isWarmSkin = (r0 > g0 && g0 > b0 && (r0 - g0) > 10f && (r0 - b0) > 18f)
+            val vibGain = if (isWarmSkin) 0.05f else 0.18f * (1f - sat)
+
+            val lum = 0.299f * r0 + 0.587f * g0 + 0.114f * b0
+            val nr = (lum + (r0 - lum) * (1f + vibGain)).roundToInt().coerceIn(0, 255)
+            val ng = (lum + (g0 - lum) * (1f + vibGain)).roundToInt().coerceIn(0, 255)
+            val nb = (lum + (b0 - lum) * (1f + vibGain)).roundToInt().coerceIn(0, 255)
+            pixels[i] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
+        }
+        return Bitmap.createBitmap(pixels, w, h, Bitmap.Config.ARGB_8888)
+    }
+
+    fun applyCameraWatermark(
+        source: Bitmap,
+        lensLabel: String,
+        iso: Int?,
+        exposureNs: Long?,
+        focalMm: Float?
+    ): Bitmap {
+        val w = source.width
+        val h = source.height
+        val barH = (min(w, h) * 0.075f).roundToInt().coerceIn(56, 180)
+        val out = Bitmap.createBitmap(w, h + barH, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(out)
+        canvas.drawColor(Color.WHITE)
+        canvas.drawBitmap(source, 0f, 0f, null)
+
+        val textSizeMain = (barH * 0.34f).coerceAtLeast(16f)
+        val textSizeSub = (barH * 0.24f).coerceAtLeast(12f)
+        val padX = (w * 0.04f).coerceAtLeast(20f)
+        val centerY = h + barH / 2f
+
+        val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(20, 22, 26)
+            textSize = textSizeMain
+            typeface = android.graphics.Typeface.create(android.graphics.Typeface.SANS_SERIF, android.graphics.Typeface.BOLD)
+        }
+        val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(228, 35, 35)
+        }
+        val metaPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(90, 96, 108)
+            textSize = textSizeSub
+            typeface = android.graphics.Typeface.create(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.NORMAL)
+            textAlign = Paint.Align.RIGHT
+        }
+
+        val dotR = (textSizeMain * 0.32f).coerceAtLeast(5f)
+        canvas.drawCircle(padX + dotR, centerY, dotR, dotPaint)
+        canvas.drawText(
+            "HUNG CAM",
+            padX + dotR * 2.8f,
+            centerY + textSizeMain * 0.34f,
+            titlePaint
+        )
+
+        val focalStr = focalMm?.let { "${it.roundToInt()}mm" } ?: lensLabel
+        val isoStr = iso?.let { "ISO$it" } ?: ""
+        val expStr = exposureNs?.let { ns ->
+            if (ns >= 1_000_000_000L) String.format("%.1fs", ns / 1_000_000_000f)
+            else "1/${(1_000_000_000L / ns.coerceAtLeast(1L)).coerceAtLeast(1L)}s"
+        } ?: ""
+        val rightText = listOf(focalStr, expStr, isoStr).filter { it.isNotBlank() }.joinToString("  •  ")
+        canvas.drawText(
+            rightText.ifBlank { lensLabel },
+            w - padX,
+            centerY + textSizeSub * 0.34f,
+            metaPaint
+        )
+        return out
+    }
+
+    private fun applyFilterPreset(cm: ColorMatrix, preset: PhotoFilterPreset, intensity: Float = 1f) {
+        val t = intensity.coerceIn(0f, 1f)
+        if (preset == PhotoFilterPreset.NATURAL || t <= 0.005f) {
+            cm.reset()
+            return
+        }
+        val target = ColorMatrix()
         when (preset) {
             PhotoFilterPreset.NATURAL -> Unit
-            PhotoFilterPreset.VIVID -> cm.setSaturation(1.35f)
-            PhotoFilterPreset.WARM -> cm.set(
+            PhotoFilterPreset.LEICA_VIBRANT -> {
+                target.setSaturation(1.24f)
+                target.postConcat(
+                    ColorMatrix(
+                        floatArrayOf(
+                            1.10f, 0f, -0.02f, 0f, -7f,
+                            0f, 1.08f, 0f, 0f, -5f,
+                            -0.02f, 0.01f, 1.12f, 0f, -8f,
+                            0f, 0f, 0f, 1f, 0f
+                        )
+                    )
+                )
+            }
+            PhotoFilterPreset.LEICA_AUTHENTIC -> {
+                target.setSaturation(0.92f)
+                target.postConcat(
+                    ColorMatrix(
+                        floatArrayOf(
+                            1.14f, 0.02f, -0.02f, 0f, -12f,
+                            0f, 1.10f, 0.01f, 0f, -10f,
+                            -0.02f, 0.02f, 1.03f, 0f, -11f,
+                            0f, 0f, 0f, 1f, 0f
+                        )
+                    )
+                )
+            }
+            PhotoFilterPreset.LEICA_BW_NAT -> {
+                target.setSaturation(0f)
+                target.postConcat(
+                    ColorMatrix(
+                        floatArrayOf(
+                            1.12f, 0f, 0f, 0f, -10f,
+                            0f, 1.12f, 0f, 0f, -10f,
+                            0f, 0f, 1.12f, 0f, -10f,
+                            0f, 0f, 0f, 1f, 0f
+                        )
+                    )
+                )
+            }
+            PhotoFilterPreset.LEICA_BW_HC -> {
+                target.set(
+                    floatArrayOf(
+                        0.46f, 0.44f, 0.10f, 0f, 0f,
+                        0.46f, 0.44f, 0.10f, 0f, 0f,
+                        0.46f, 0.44f, 0.10f, 0f, 0f,
+                        0f, 0f, 0f, 1f, 0f
+                    )
+                )
+                target.postConcat(
+                    ColorMatrix(
+                        floatArrayOf(
+                            1.36f, 0f, 0f, 0f, -38f,
+                            0f, 1.36f, 0f, 0f, -38f,
+                            0f, 0f, 1.36f, 0f, -38f,
+                            0f, 0f, 0f, 1f, 0f
+                        )
+                    )
+                )
+            }
+            PhotoFilterPreset.LEICA_SEPIA -> {
+                target.setSaturation(0f)
+                target.postConcat(
+                    ColorMatrix(
+                        floatArrayOf(
+                            1.14f, 0f, 0f, 0f, 8f,
+                            0f, 1.00f, 0f, 0f, 0f,
+                            0f, 0f, 0.78f, 0f, -8f,
+                            0f, 0f, 0f, 1f, 0f
+                        )
+                    )
+                )
+            }
+            PhotoFilterPreset.LEICA_BLUE -> {
+                target.setSaturation(0.96f)
+                target.postConcat(
+                    ColorMatrix(
+                        floatArrayOf(
+                            0.94f, 0f, 0.03f, 0f, -6f,
+                            0f, 1.04f, 0.04f, 0f, -2f,
+                            0.02f, 0.06f, 1.18f, 0f, 10f,
+                            0f, 0f, 0f, 1f, 0f
+                        )
+                    )
+                )
+            }
+            PhotoFilterPreset.PORTRA -> {
+                target.setSaturation(1.04f)
+                target.postConcat(
+                    ColorMatrix(
+                        floatArrayOf(
+                            1.06f, 0.03f, 0f, 0f, 10f,
+                            0.01f, 1.03f, 0.01f, 0f, 7f,
+                            0f, 0.02f, 0.96f, 0f, 11f,
+                            0f, 0f, 0f, 1f, 0f
+                        )
+                    )
+                )
+            }
+            PhotoFilterPreset.FUJI_PRO -> {
+                target.setSaturation(0.95f)
+                target.postConcat(
+                    ColorMatrix(
+                        floatArrayOf(
+                            1.04f, -0.02f, 0f, 0f, -4f,
+                            0.02f, 1.08f, 0.02f, 0f, -2f,
+                            0f, 0.04f, 1.08f, 0f, 4f,
+                            0f, 0f, 0f, 1f, 0f
+                        )
+                    )
+                )
+            }
+            PhotoFilterPreset.VIVID -> target.setSaturation(1.38f)
+            PhotoFilterPreset.WARM -> target.set(
                 floatArrayOf(
-                    1.08f, 0f, 0f, 0f, 10f,
+                    1.09f, 0f, 0f, 0f, 10f,
                     0f, 1.02f, 0f, 0f, 4f,
                     0f, 0f, 0.90f, 0f, -8f,
                     0f, 0f, 0f, 1f, 0f
                 )
             )
-            PhotoFilterPreset.COOL -> cm.set(
+            PhotoFilterPreset.COOL -> target.set(
                 floatArrayOf(
                     0.92f, 0f, 0f, 0f, -6f,
                     0f, 1.01f, 0f, 0f, 2f,
@@ -568,15 +789,15 @@ object ImageProcessor {
                     0f, 0f, 0f, 1f, 0f
                 )
             )
-            PhotoFilterPreset.FILM -> cm.set(
+            PhotoFilterPreset.FILM -> target.set(
                 floatArrayOf(
-                    1.05f, 0.04f, 0f, 0f, -4f,
+                    1.06f, 0.04f, 0f, 0f, -4f,
                     0f, 1.03f, 0.02f, 0f, -2f,
-                    0.02f, 0f, 0.96f, 0f, 6f,
+                    0.02f, 0f, 0.97f, 0f, 7f,
                     0f, 0f, 0f, 1f, 0f
                 )
             )
-            PhotoFilterPreset.VINTAGE -> cm.set(
+            PhotoFilterPreset.VINTAGE -> target.set(
                 floatArrayOf(
                     0.98f, 0.12f, 0.04f, 0f, 14f,
                     0.05f, 0.92f, 0.06f, 0f, 8f,
@@ -584,7 +805,7 @@ object ImageProcessor {
                     0f, 0f, 0f, 1f, 0f
                 )
             )
-            PhotoFilterPreset.CINEMATIC -> cm.set(
+            PhotoFilterPreset.CINEMATIC -> target.set(
                 floatArrayOf(
                     1.08f, 0f, -0.04f, 0f, 4f,
                     -0.02f, 1.02f, 0.02f, 0f, -2f,
@@ -592,7 +813,22 @@ object ImageProcessor {
                     0f, 0f, 0f, 1f, 0f
                 )
             )
-            PhotoFilterPreset.BW -> cm.setSaturation(0f)
+            PhotoFilterPreset.BW -> target.setSaturation(0f)
+        }
+        if (t >= 0.995f) {
+            cm.set(target)
+        } else {
+            val id = floatArrayOf(
+                1f, 0f, 0f, 0f, 0f,
+                0f, 1f, 0f, 0f, 0f,
+                0f, 0f, 1f, 0f, 0f,
+                0f, 0f, 0f, 1f, 0f
+            )
+            val dst = target.array
+            val blended = FloatArray(20) { idx ->
+                id[idx] + (dst[idx] - id[idx]) * t
+            }
+            cm.set(blended)
         }
     }
 

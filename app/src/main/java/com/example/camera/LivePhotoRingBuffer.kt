@@ -34,7 +34,7 @@ data class LiveClipResult(
 /**
  * Circular rolling MediaCodec buffer for true pre-shutter + post-shutter Live Photo capture.
  * Uses unified SystemClock.elapsedRealtimeNanos() wallTimeUs across video, audio, and shutter events
- * so deep-sleep / CLOCK_MONOTONIC vs CLOCK_BOOTTIME offsets never truncate 2s / 3s / 5s clips,
+ * so deep-sleep / CLOCK_MONOTONIC vs CLOCK_BOOTTIME offsets never truncate 2s / 3s / 5s / 10s clips,
  * while preserving exact codecPtsUs frame deltas and frequent sync keyframes.
  */
 class LivePhotoRingBuffer(
@@ -42,7 +42,7 @@ class LivePhotoRingBuffer(
     val height: Int = 960,
     val bitrateBps: Int = 12_000_000,
     val fps: Int = 30,
-    private val maxBufferSeconds: Int = 8
+    private val maxBufferSeconds: Int = 14
 ) {
     private var videoEncoder: MediaCodec? = null
     private var audioEncoder: MediaCodec? = null
@@ -58,8 +58,8 @@ class LivePhotoRingBuffer(
 
     private val videoLock = Any()
     private val audioLock = Any()
-    private val videoPackets = ArrayDeque<EncodedFrame>(360)
-    private val audioPackets = ArrayDeque<EncodedFrame>(640)
+    private val videoPackets = ArrayDeque<EncodedFrame>(480)
+    private val audioPackets = ArrayDeque<EncodedFrame>(768)
 
     @Volatile
     private var audioEnabled = false
@@ -220,7 +220,7 @@ class LivePhotoRingBuffer(
                                 }
                                 if (nextKeyIdx > 0) {
                                     repeat(nextKeyIdx) { videoPackets.removeFirst() }
-                                } else if (videoPackets.size > maxBufferSeconds * fps + 90) {
+                                } else if (videoPackets.size > maxBufferSeconds * fps + 120) {
                                     videoPackets.removeFirst()
                                 } else {
                                     break
@@ -307,7 +307,8 @@ class LivePhotoRingBuffer(
         durationSeconds: Int,
         shutterMonotonicUs: Long,
         outputFile: File,
-        orientationHint: Int = 90
+        orientationHint: Int = 90,
+        onPostShutterProgress: ((Float) -> Unit)? = null
     ): Result<LiveClipResult> {
         val hasInitialPackets = synchronized(videoLock) { videoPackets.isNotEmpty() && videoFormat != null }
         if (!running.get() && !hasInitialPackets) {
@@ -322,7 +323,7 @@ class LivePhotoRingBuffer(
                 ((shutterMonotonicUs - firstWall) / 1000L).coerceIn(0L, halfWindowMs)
             } else 0L
         }
-        // If buffer started very recently, extend post-shutter window so total clip still meets 2s/3s/5s
+        // If buffer started very recently, extend post-shutter window so total clip still meets 2s/3s/5s/10s
         val postNeededMs = (targetMs - preAvailableMs).coerceIn(halfWindowMs, targetMs)
         val alreadyElapsedMs = ((SystemClock.elapsedRealtimeNanos() / 1000L - shutterMonotonicUs) / 1000L).coerceAtLeast(0L)
         val remainingWaitMs = (postNeededMs + 280L - alreadyElapsedMs).coerceAtLeast(160L)
@@ -343,9 +344,14 @@ class LivePhotoRingBuffer(
                 aSnapshot = audioPackets.toList()
             }
         }
-        val waitEndMs = SystemClock.elapsedRealtime() + remainingWaitMs
-        while (SystemClock.elapsedRealtime() < waitEndMs) {
-            if (!running.get()) break
+        val waitStartMs = SystemClock.elapsedRealtime()
+        val waitEndMs = waitStartMs + remainingWaitMs
+        onPostShutterProgress?.invoke(0.04f)
+        while (true) {
+            val nowMs = SystemClock.elapsedRealtime()
+            if (nowMs >= waitEndMs || !running.get()) break
+            val progress = ((nowMs - waitStartMs).toFloat() / remainingWaitMs.toFloat()).coerceIn(0.05f, 0.99f)
+            onPostShutterProgress?.invoke(progress)
             delay(45L)
             synchronized(videoLock) {
                 if (videoPackets.isNotEmpty()) {
@@ -359,6 +365,7 @@ class LivePhotoRingBuffer(
                 }
             }
         }
+        onPostShutterProgress?.invoke(1f)
 
         synchronized(videoLock) {
             if (videoPackets.isNotEmpty()) {

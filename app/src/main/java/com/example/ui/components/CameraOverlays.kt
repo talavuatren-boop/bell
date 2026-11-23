@@ -1,8 +1,14 @@
 package com.example.ui.components
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -12,9 +18,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -22,6 +26,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -29,7 +35,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.rotate
-import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.camera.FocusPeakingOverlayData
@@ -138,10 +144,21 @@ fun TapFocusReticle(
     modifier: Modifier = Modifier
 ) {
     val accent = LocalAccentColor.current
+    val animEnabled = LocalAnimationsEnabled.current
+    val lockScale = remember { Animatable(1f) }
+    LaunchedEffect(normalizedPos, visible) {
+        if (visible && normalizedPos != null && animEnabled) {
+            lockScale.snapTo(1.36f)
+            lockScale.animateTo(1f, animationSpec = HungCamMotion.bouncySpringFloat)
+        } else {
+            lockScale.snapTo(1f)
+        }
+    }
+
     AnimatedVisibility(
         visible = visible && normalizedPos != null,
-        enter = fadeIn(),
-        exit = fadeOut(),
+        enter = if (animEnabled) fadeIn(tween(120)) + scaleIn(initialScale = 1.15f, animationSpec = HungCamMotion.fastSpringFloat) else fadeIn(tween(0)),
+        exit = if (animEnabled) fadeOut(tween(180)) + scaleOut(targetScale = 0.88f, animationSpec = tween(180)) else fadeOut(tween(0)),
         modifier = modifier
     ) {
         normalizedPos?.let { pos ->
@@ -149,7 +166,7 @@ fun TapFocusReticle(
                 Canvas(modifier = Modifier.fillMaxSize()) {
                     val px = pos.x * size.width
                     val py = pos.y * size.height
-                    val half = 30.dp.toPx()
+                    val half = 30.dp.toPx() * lockScale.value
                     val corner = 9.dp.toPx()
                     val stroke = 2.dp.toPx()
                     val left = px - half
@@ -225,18 +242,39 @@ fun LiveHistogramHud(
 
 @Composable
 fun SelfTimerCountdownHud(secondsRemaining: Int, modifier: Modifier = Modifier) {
-    if (secondsRemaining <= 0) return
-    Box(
+    val animEnabled = LocalAnimationsEnabled.current
+    AnimatedVisibility(
+        visible = secondsRemaining > 0,
+        enter = if (animEnabled) fadeIn(tween(150)) + scaleIn(initialScale = 0.8f, animationSpec = HungCamMotion.bouncySpringFloat) else fadeIn(tween(0)),
+        exit = if (animEnabled) fadeOut(tween(120)) + scaleOut(targetScale = 0.75f) else fadeOut(tween(0)),
         modifier = modifier
-            .size(110.dp)
-            .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(55.dp))
-            .border(2.dp, LocalAccentColor.current, RoundedCornerShape(55.dp)),
-        contentAlignment = Alignment.Center
     ) {
-        Text(
-            text = secondsRemaining.toString(),
-            style = MaterialTheme.typography.displaySmall.copy(fontSize = 48.sp),
-            color = PureWhite
-        )
+        Box(
+            modifier = Modifier
+                .size(110.dp)
+                .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(55.dp))
+                .border(2.dp, LocalAccentColor.current, RoundedCornerShape(55.dp)),
+            contentAlignment = Alignment.Center
+        ) {
+            AnimatedContent(
+                targetState = secondsRemaining,
+                transitionSpec = {
+                    if (animEnabled) {
+                        (scaleIn(initialScale = 1.4f, animationSpec = HungCamMotion.bouncySpringFloat) + fadeIn(tween(120))) togetherWith
+                            (scaleOut(targetScale = 0.7f, animationSpec = tween(110)) + fadeOut(tween(110)))
+                    } else {
+                        fadeIn(tween(0)) togetherWith fadeOut(tween(0))
+                    }
+                },
+                label = "countdownNumber"
+            ) { sec ->
+                Text(
+                    text = sec.coerceAtLeast(0).toString(),
+                    style = MaterialTheme.typography.displaySmall.copy(fontSize = 48.sp),
+                    color = PureWhite,
+                    modifier = Modifier.graphicsLayer { clip = false }
+                )
+            }
+        }
     }
 }

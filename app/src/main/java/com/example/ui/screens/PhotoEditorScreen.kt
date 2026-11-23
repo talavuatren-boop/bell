@@ -556,24 +556,76 @@ fun PhotoEditorScreen(
                     }
                 }
                 PhotoEditorSection.FILTERS -> {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        PhotoFilterPreset.entries.forEach { preset ->
-                            val selected = currentAdj.filter == preset
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(if (selected) accent else ElevatedObsidian)
-                                    .border(1.dp, if (selected) accent else HairlineBorder, RoundedCornerShape(10.dp))
-                                    .clickable { pushAdjustment(currentAdj.copy(filter = preset)) }
-                                    .padding(horizontal = 14.dp, vertical = 10.dp)
-                                    .testTag("photo_filter_${preset.name.lowercase()}")
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            PhotoFilterPreset.entries.forEach { preset ->
+                                val selected = currentAdj.filter == preset
+                                val gradColors = com.example.ui.components.filterSwatchGradient(preset)
+                                Column(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(if (selected) accent.copy(alpha = 0.2f) else ElevatedObsidian)
+                                        .border(
+                                            1.dp,
+                                            if (selected) accent else HairlineBorder,
+                                            RoundedCornerShape(12.dp)
+                                        )
+                                        .clickable { pushAdjustment(currentAdj.copy(filter = preset)) }
+                                        .padding(horizontal = 10.dp, vertical = 8.dp)
+                                        .testTag("photo_filter_${preset.name.lowercase()}"),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(28.dp)
+                                            .clip(androidx.compose.foundation.shape.CircleShape)
+                                            .background(androidx.compose.ui.graphics.Brush.linearGradient(gradColors)),
+                                        contentAlignment = Alignment.TopEnd
+                                    ) {
+                                        if (preset.isLeica) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .padding(2.dp)
+                                                    .size(7.dp)
+                                                    .clip(androidx.compose.foundation.shape.CircleShape)
+                                                    .background(com.example.ui.theme.CrimsonShutter)
+                                            )
+                                        }
+                                    }
+                                    Text(
+                                        preset.label,
+                                        style = MonoTelemetrySmall.copy(fontSize = 10.sp),
+                                        color = if (selected) accent else PureWhite
+                                    )
+                                }
+                            }
+                        }
+                        if (currentAdj.filter != PhotoFilterPreset.NATURAL) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                Text(preset.label, style = MonoTelemetrySmall, color = if (selected) PureBlack else PureWhite)
+                                Text("Cường độ", style = MonoTelemetrySmall, color = MutedSlate)
+                                Slider(
+                                    value = currentAdj.filterIntensity,
+                                    onValueChange = { currentAdj = currentAdj.copy(filterIntensity = it) },
+                                    onValueChangeFinished = { undoStack.add(currentAdj) },
+                                    valueRange = 0.15f..1f,
+                                    colors = SliderDefaults.colors(thumbColor = accent, activeTrackColor = accent),
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Text(
+                                    "${(currentAdj.filterIntensity * 100).toInt()}%",
+                                    style = MonoTelemetrySmall,
+                                    color = accent
+                                )
                             }
                         }
                     }

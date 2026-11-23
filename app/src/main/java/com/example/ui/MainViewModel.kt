@@ -141,6 +141,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _cameraFilter = MutableStateFlow(PhotoFilterPreset.NATURAL)
     val cameraFilter: StateFlow<PhotoFilterPreset> = _cameraFilter.asStateFlow()
 
+    private val _cameraFilterIntensity = MutableStateFlow(0.88f)
+    val cameraFilterIntensity: StateFlow<Float> = _cameraFilterIntensity.asStateFlow()
+
     private val _galleryCategory = MutableStateFlow(GalleryCategory.ALL)
     val galleryCategory: StateFlow<GalleryCategory> = _galleryCategory.asStateFlow()
 
@@ -373,7 +376,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setCameraFilter(filter: PhotoFilterPreset) {
         _cameraFilter.value = filter
-        cameraEngine.updateCameraFilter(filter)
+        cameraEngine.updateCameraFilter(filter, _cameraFilterIntensity.value)
+        performHapticTick()
+    }
+
+    fun setCameraFilterIntensity(intensity: Float) {
+        val clamped = intensity.coerceIn(0.15f, 1f)
+        _cameraFilterIntensity.value = clamped
+        cameraEngine.updateCameraFilter(_cameraFilter.value, clamped)
+    }
+
+    fun toggleRecordingMicMute() {
+        cameraEngine.toggleRecordingAudioMute()
         performHapticTick()
     }
 

@@ -15,6 +15,15 @@ enum class CameraMode(val label: String) {
     SLOW_MOTION("SLOW-MO"),
     TIMELAPSE("TIMELAPSE");
 
+    fun flagshipLabel(): String = when (this) {
+        PHOTO -> "ẢNH"
+        VIDEO -> "VIDEO"
+        PORTRAIT -> "CHÂN DUNG"
+        PRO -> "CHUYÊN NGHIỆP"
+        SLOW_MOTION -> "CHẬM"
+        TIMELAPSE -> "TUA NHANH"
+    }
+
     companion object {
         val primaryBarModes: List<CameraMode> = listOf(PHOTO, VIDEO, PORTRAIT)
         val extraMoreModes: List<CameraMode> = listOf(PRO, SLOW_MOTION, TIMELAPSE)
@@ -44,7 +53,8 @@ enum class LivePhotoDuration(val seconds: Int, val label: String) {
     OFF(0, "OFF"),
     TWO_SEC(2, "2s"),
     THREE_SEC(3, "3s"),
-    FIVE_SEC(5, "5s")
+    FIVE_SEC(5, "5s"),
+    TEN_SEC(10, "10s")
 }
 
 enum class SelfTimerDuration(val seconds: Int, val label: String) {
@@ -129,15 +139,33 @@ enum class AiToolType(val label: String, val isVideoOnly: Boolean, val isPhotoCo
     FRAME_INTERPOLATE("Frame Interp 60fps", true, false)
 }
 
-enum class PhotoFilterPreset(val label: String) {
-    NATURAL("Natural"),
-    VIVID("Vivid"),
-    WARM("Warm"),
-    COOL("Cool"),
-    FILM("Film"),
-    VINTAGE("Vintage"),
-    CINEMATIC("Cinematic"),
-    BW("B&W")
+enum class FilterCategory(val label: String) {
+    BASE("Gốc"),
+    LEICA("Leica"),
+    FILM("Máy ảnh")
+}
+
+enum class PhotoFilterPreset(
+    val label: String,
+    val category: FilterCategory = FilterCategory.FILM,
+    val isLeica: Boolean = false
+) {
+    NATURAL("Gốc", FilterCategory.BASE, false),
+    LEICA_VIBRANT("Leica Vivid", FilterCategory.LEICA, true),
+    LEICA_AUTHENTIC("Leica Nat", FilterCategory.LEICA, true),
+    LEICA_BW_NAT("Leica BW", FilterCategory.LEICA, true),
+    LEICA_BW_HC("Leica HC", FilterCategory.LEICA, true),
+    LEICA_SEPIA("Leica Sepia", FilterCategory.LEICA, true),
+    LEICA_BLUE("Leica Blue", FilterCategory.LEICA, true),
+    PORTRA("Portra 400", FilterCategory.FILM, false),
+    FUJI_PRO("Fuji Pro", FilterCategory.FILM, false),
+    VIVID("Rực rỡ", FilterCategory.FILM, false),
+    WARM("Ấm áp", FilterCategory.FILM, false),
+    COOL("Mát lạnh", FilterCategory.FILM, false),
+    FILM("Phim 35mm", FilterCategory.FILM, false),
+    VINTAGE("Cổ điển", FilterCategory.FILM, false),
+    CINEMATIC("Điện ảnh", FilterCategory.FILM, false),
+    BW("Đen trắng", FilterCategory.FILM, false)
 }
 
 enum class CropAspectPreset(val label: String, val ratio: Float?) {
@@ -316,6 +344,7 @@ data class PhotoEditAdjustments(
     val flipVertical: Boolean = false,
     val cropPreset: CropAspectPreset = CropAspectPreset.FREE,
     val filter: PhotoFilterPreset = PhotoFilterPreset.NATURAL,
+    val filterIntensity: Float = 1f,
     val stickers: List<StickerItem> = emptyList(),
     val memeCaption: MemeCaptionConfig = MemeCaptionConfig()
 )
@@ -332,6 +361,7 @@ data class VideoEditConfig(
     val saturation: Float = 1f,
     val temperature: Float = 0f,
     val filter: PhotoFilterPreset = PhotoFilterPreset.NATURAL,
+    val filterIntensity: Float = 1f,
     val applyStabilization: Boolean = false,
     val applyDenoise: Boolean = false,
     val applySharpen: Boolean = false,

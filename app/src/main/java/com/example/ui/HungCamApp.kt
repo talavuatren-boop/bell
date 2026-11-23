@@ -95,183 +95,222 @@ fun HungCamApp(
         darkTheme = settings.darkModeEnabled,
         accentPreset = settings.accentColorPreset
     ) {
-        val accent = LocalAccentColor.current
+        androidx.compose.runtime.CompositionLocalProvider(
+            com.example.ui.components.LocalAnimationsEnabled provides settings.animationsEnabled
+        ) {
+            val accent = LocalAccentColor.current
 
-        when (val sub = subScreen) {
-            is SubScreen.Viewer -> {
-                val viewerIds = remember(sub.assets) { sub.assets.map { it.id }.toSet() }
-                val fromTrash = remember(sub.assets) { sub.assets.firstOrNull()?.isDeleted == true }
-                val liveAssets = remember(activeAssets, deletedAssets, viewerIds, fromTrash) {
-                    val pool = if (fromTrash) deletedAssets else activeAssets
-                    val filtered = pool.filter { it.id in viewerIds }
-                    filtered.ifEmpty { emptyList() }
-                }
-                val startId = remember(sub.assets, sub.index) {
-                    sub.assets.getOrNull(sub.index)?.id
-                }
-                val syncedAssets = if (liveAssets.isEmpty() && activeAssets.isEmpty() && deletedAssets.isEmpty()) {
-                    sub.assets
-                } else {
-                    liveAssets
-                }
-                val resolvedIndex = syncedAssets.indexOfFirst { it.id == startId }
-                    .takeIf { it >= 0 } ?: sub.index.coerceIn(0, (syncedAssets.size - 1).coerceAtLeast(0))
-
-                MediaViewerScreen(
-                    assets = syncedAssets,
-                    initialIndex = resolvedIndex,
-                    viewModel = viewModel,
-                    onBack = { subScreen = SubScreen.None },
-                    onOpenPhotoEditor = { asset -> subScreen = SubScreen.PhotoEdit(asset) },
-                    onOpenVideoEditor = { asset -> subScreen = SubScreen.VideoEdit(asset) },
-                    onOpenAiStudio = { asset ->
-                        viewModel.selectAssetForAiStudio(asset)
-                        subScreen = SubScreen.None
-                        currentTab = MainNavDestination.AI_STUDIO
-                    }
-                )
-            }
-            is SubScreen.PhotoEdit -> {
-                PhotoEditorScreen(
-                    asset = sub.asset,
-                    viewModel = viewModel,
-                    onBack = { subScreen = SubScreen.None },
-                    openStickersMemeInitially = sub.openStickersMeme
-                )
-            }
-            is SubScreen.VideoEdit -> {
-                VideoEditorScreen(
-                    asset = sub.asset,
-                    viewModel = viewModel,
-                    onBack = { subScreen = SubScreen.None }
-                )
-            }
-            is SubScreen.VideoMerge -> {
-                VideoMergeScreen(
-                    viewModel = viewModel,
-                    onBack = { subScreen = SubScreen.None }
-                )
-            }
-            is SubScreen.CapabilityReport -> {
-                CapabilityReportScreen(
-                    viewModel = viewModel,
-                    onBack = { subScreen = SubScreen.None }
-                )
-            }
-            SubScreen.None -> {
-                BoxWithConstraints(modifier = Modifier.fillMaxSize().background(PureBlack)) {
-                    val useRail = maxWidth >= 600.dp
-
-                    Scaffold(
-                        containerColor = PureBlack,
-                        snackbarHost = { SnackbarHost(snackbarHostState) },
-                        bottomBar = {
-                            if (!useRail) {
-                                NavigationBar(
-                                    containerColor = ObsidianSurface,
-                                    contentColor = PureWhite,
-                                    windowInsets = WindowInsets.navigationBars
-                                ) {
-                                    MainNavDestination.entries.forEach { dest ->
-                                        val selected = currentTab == dest
-                                        NavigationBarItem(
-                                            selected = selected,
-                                            onClick = {
-                                                currentTab = dest
-                                                viewModel.performHapticTick()
-                                            },
-                                            icon = {
-                                                Icon(
-                                                    imageVector = navIconFor(dest, selected),
-                                                    contentDescription = dest.label
-                                                )
-                                            },
-                                            label = { Text(dest.label) },
-                                            colors = NavigationBarItemDefaults.colors(
-                                                selectedIconColor = PureBlack,
-                                                selectedTextColor = accent,
-                                                indicatorColor = accent,
-                                                unselectedIconColor = MutedSlate,
-                                                unselectedTextColor = MutedSlate
-                                            ),
-                                            modifier = Modifier.testTag("nav_${dest.route}")
-                                        )
-                                    }
-                                }
-                            }
+            androidx.compose.animation.AnimatedContent(
+                targetState = subScreen,
+                transitionSpec = {
+                    val forward = targetState != SubScreen.None
+                    com.example.ui.components.HungCamMotion.screenTransition(
+                        forward = forward,
+                        animationsEnabled = settings.animationsEnabled
+                    )
+                },
+                label = "subScreenTransition"
+            ) { sub ->
+                when (sub) {
+                    is SubScreen.Viewer -> {
+                        val viewerIds = remember(sub.assets) { sub.assets.map { it.id }.toSet() }
+                        val fromTrash = remember(sub.assets) { sub.assets.firstOrNull()?.isDeleted == true }
+                        val liveAssets = remember(activeAssets, deletedAssets, viewerIds, fromTrash) {
+                            val pool = if (fromTrash) deletedAssets else activeAssets
+                            val filtered = pool.filter { it.id in viewerIds }
+                            filtered.ifEmpty { emptyList() }
                         }
-                    ) { innerPadding ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(innerPadding)
-                        ) {
-                            if (useRail) {
-                                NavigationRail(
-                                    containerColor = ObsidianSurface,
-                                    contentColor = PureWhite,
-                                    modifier = Modifier
-                                        .fillMaxHeight()
-                                        .windowInsetsPadding(WindowInsets.navigationBars)
-                                ) {
-                                    MainNavDestination.entries.forEach { dest ->
-                                        val selected = currentTab == dest
-                                        NavigationRailItem(
-                                            selected = selected,
-                                            onClick = {
-                                                currentTab = dest
-                                                viewModel.performHapticTick()
-                                            },
-                                            icon = {
-                                                Icon(
-                                                    imageVector = navIconFor(dest, selected),
-                                                    contentDescription = dest.label
+                        val startId = remember(sub.assets, sub.index) {
+                            sub.assets.getOrNull(sub.index)?.id
+                        }
+                        val syncedAssets = if (liveAssets.isEmpty() && activeAssets.isEmpty() && deletedAssets.isEmpty()) {
+                            sub.assets
+                        } else {
+                            liveAssets
+                        }
+                        val resolvedIndex = syncedAssets.indexOfFirst { it.id == startId }
+                            .takeIf { it >= 0 } ?: sub.index.coerceIn(0, (syncedAssets.size - 1).coerceAtLeast(0))
+
+                        MediaViewerScreen(
+                            assets = syncedAssets,
+                            initialIndex = resolvedIndex,
+                            viewModel = viewModel,
+                            onBack = { subScreen = SubScreen.None },
+                            onOpenPhotoEditor = { asset -> subScreen = SubScreen.PhotoEdit(asset) },
+                            onOpenVideoEditor = { asset -> subScreen = SubScreen.VideoEdit(asset) },
+                            onOpenAiStudio = { asset ->
+                                viewModel.selectAssetForAiStudio(asset)
+                                subScreen = SubScreen.None
+                                currentTab = MainNavDestination.AI_STUDIO
+                            }
+                        )
+                    }
+                    is SubScreen.PhotoEdit -> {
+                        PhotoEditorScreen(
+                            asset = sub.asset,
+                            viewModel = viewModel,
+                            onBack = { subScreen = SubScreen.None },
+                            openStickersMemeInitially = sub.openStickersMeme
+                        )
+                    }
+                    is SubScreen.VideoEdit -> {
+                        VideoEditorScreen(
+                            asset = sub.asset,
+                            viewModel = viewModel,
+                            onBack = { subScreen = SubScreen.None }
+                        )
+                    }
+                    is SubScreen.VideoMerge -> {
+                        VideoMergeScreen(
+                            viewModel = viewModel,
+                            onBack = { subScreen = SubScreen.None }
+                        )
+                    }
+                    is SubScreen.CapabilityReport -> {
+                        CapabilityReportScreen(
+                            viewModel = viewModel,
+                            onBack = { subScreen = SubScreen.None }
+                        )
+                    }
+                    SubScreen.None -> {
+                        androidx.activity.compose.BackHandler(enabled = currentTab != MainNavDestination.CAMERA) {
+                            currentTab = MainNavDestination.CAMERA
+                        }
+                        BoxWithConstraints(modifier = Modifier.fillMaxSize().background(PureBlack)) {
+                            val isCameraTab = currentTab == MainNavDestination.CAMERA
+                            val useRail = maxWidth >= 600.dp && !isCameraTab
+
+                            Scaffold(
+                                containerColor = PureBlack,
+                                contentWindowInsets = WindowInsets(0, 0, 0, 0),
+                                snackbarHost = { SnackbarHost(snackbarHostState) },
+                                bottomBar = {
+                                    if (!isCameraTab && !useRail) {
+                                        NavigationBar(
+                                            containerColor = ObsidianSurface,
+                                            contentColor = PureWhite,
+                                            windowInsets = WindowInsets.navigationBars
+                                        ) {
+                                            MainNavDestination.entries.forEach { dest ->
+                                                val selected = currentTab == dest
+                                                NavigationBarItem(
+                                                    selected = selected,
+                                                    onClick = {
+                                                        currentTab = dest
+                                                        viewModel.performHapticTick()
+                                                    },
+                                                    icon = {
+                                                        Icon(
+                                                            imageVector = navIconFor(dest, selected),
+                                                            contentDescription = dest.label
+                                                        )
+                                                    },
+                                                    label = { Text(dest.label) },
+                                                    colors = NavigationBarItemDefaults.colors(
+                                                        selectedIconColor = PureBlack,
+                                                        selectedTextColor = accent,
+                                                        indicatorColor = accent,
+                                                        unselectedIconColor = MutedSlate,
+                                                        unselectedTextColor = MutedSlate
+                                                    ),
+                                                    modifier = Modifier.testTag("nav_${dest.route}")
                                                 )
-                                            },
-                                            label = { Text(dest.label) },
-                                            colors = NavigationRailItemDefaults.colors(
-                                                selectedIconColor = PureBlack,
-                                                selectedTextColor = accent,
-                                                indicatorColor = accent,
-                                                unselectedIconColor = MutedSlate,
-                                                unselectedTextColor = MutedSlate
-                                            ),
-                                            modifier = Modifier.testTag("nav_rail_${dest.route}")
-                                        )
+                                            }
+                                        }
                                     }
                                 }
-                            }
+                            ) { innerPadding ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .padding(innerPadding)
+                                ) {
+                                    if (useRail) {
+                                        NavigationRail(
+                                            containerColor = ObsidianSurface,
+                                            contentColor = PureWhite,
+                                            modifier = Modifier
+                                                .fillMaxHeight()
+                                                .windowInsetsPadding(WindowInsets.navigationBars)
+                                        ) {
+                                            MainNavDestination.entries.forEach { dest ->
+                                                val selected = currentTab == dest
+                                                NavigationRailItem(
+                                                    selected = selected,
+                                                    onClick = {
+                                                        currentTab = dest
+                                                        viewModel.performHapticTick()
+                                                    },
+                                                    icon = {
+                                                        Icon(
+                                                            imageVector = navIconFor(dest, selected),
+                                                            contentDescription = dest.label
+                                                        )
+                                                    },
+                                                    label = { Text(dest.label) },
+                                                    colors = NavigationRailItemDefaults.colors(
+                                                        selectedIconColor = PureBlack,
+                                                        selectedTextColor = accent,
+                                                        indicatorColor = accent,
+                                                        unselectedIconColor = MutedSlate,
+                                                        unselectedTextColor = MutedSlate
+                                                    ),
+                                                    modifier = Modifier.testTag("nav_rail_${dest.route}")
+                                                )
+                                            }
+                                        }
+                                    }
 
-                            when (currentTab) {
-                                MainNavDestination.CAMERA -> CameraScreen(
-                                    viewModel = viewModel,
-                                    onOpenGallery = { currentTab = MainNavDestination.GALLERY },
-                                    onOpenStickersMeme = { asset ->
-                                        subScreen = SubScreen.PhotoEdit(asset, openStickersMeme = true)
-                                    },
-                                    onOpenVideoMerge = { subScreen = SubScreen.VideoMerge },
-                                    modifier = Modifier.fillMaxSize()
-                                )
-                                MainNavDestination.GALLERY -> GalleryScreen(
-                                    viewModel = viewModel,
-                                    onOpenViewer = { list, idx -> subScreen = SubScreen.Viewer(list, idx) },
-                                    onGoToCamera = { currentTab = MainNavDestination.CAMERA },
-                                    onOpenVideoMerge = { subScreen = SubScreen.VideoMerge },
-                                    modifier = Modifier.fillMaxSize()
-                                )
-                                MainNavDestination.AI_STUDIO -> AiStudioScreen(
-                                    viewModel = viewModel,
-                                    onOpenVideoMerge = { subScreen = SubScreen.VideoMerge },
-                                    onOpenStickersMeme = { asset ->
-                                        subScreen = SubScreen.PhotoEdit(asset, openStickersMeme = true)
-                                    },
-                                    modifier = Modifier.fillMaxSize()
-                                )
-                                MainNavDestination.SETTINGS -> SettingsScreen(
-                                    viewModel = viewModel,
-                                    onOpenCapabilityReport = { subScreen = SubScreen.CapabilityReport },
-                                    modifier = Modifier.fillMaxSize()
-                                )
+                                    androidx.compose.animation.AnimatedContent(
+                                        targetState = currentTab,
+                                        transitionSpec = {
+                                            val forward = targetState.ordinal >= initialState.ordinal
+                                            com.example.ui.components.HungCamMotion.screenTransition(
+                                                forward = forward,
+                                                animationsEnabled = settings.animationsEnabled
+                                            )
+                                        },
+                                        modifier = Modifier.weight(1f).fillMaxHeight(),
+                                        label = "mainTabTransition"
+                                    ) { tab ->
+                                        when (tab) {
+                                            MainNavDestination.CAMERA -> CameraScreen(
+                                                viewModel = viewModel,
+                                                onOpenGallery = { currentTab = MainNavDestination.GALLERY },
+                                                onOpenSettings = { currentTab = MainNavDestination.SETTINGS },
+                                                onOpenAiStudio = { currentTab = MainNavDestination.AI_STUDIO },
+                                                onOpenCapabilityReport = { subScreen = SubScreen.CapabilityReport },
+                                                onOpenStickersMeme = { asset ->
+                                                    subScreen = SubScreen.PhotoEdit(asset, openStickersMeme = true)
+                                                },
+                                                onOpenVideoMerge = { subScreen = SubScreen.VideoMerge },
+                                                modifier = Modifier.fillMaxSize()
+                                            )
+                                            MainNavDestination.GALLERY -> GalleryScreen(
+                                                viewModel = viewModel,
+                                                onOpenViewer = { list, idx -> subScreen = SubScreen.Viewer(list, idx) },
+                                                onGoToCamera = { currentTab = MainNavDestination.CAMERA },
+                                                onOpenSettings = { currentTab = MainNavDestination.SETTINGS },
+                                                onOpenVideoMerge = { subScreen = SubScreen.VideoMerge },
+                                                modifier = Modifier.fillMaxSize()
+                                            )
+                                            MainNavDestination.AI_STUDIO -> AiStudioScreen(
+                                                viewModel = viewModel,
+                                                onOpenVideoMerge = { subScreen = SubScreen.VideoMerge },
+                                                onOpenStickersMeme = { asset ->
+                                                    subScreen = SubScreen.PhotoEdit(asset, openStickersMeme = true)
+                                                },
+                                                modifier = Modifier.fillMaxSize()
+                                            )
+                                            MainNavDestination.SETTINGS -> SettingsScreen(
+                                                viewModel = viewModel,
+                                                onBack = { currentTab = MainNavDestination.CAMERA },
+                                                onOpenCapabilityReport = { subScreen = SubScreen.CapabilityReport },
+                                                modifier = Modifier.fillMaxSize()
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

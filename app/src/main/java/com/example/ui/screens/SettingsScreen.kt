@@ -25,9 +25,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material3.Icon
@@ -73,6 +75,7 @@ import com.example.ui.theme.WarningAmber
 fun SettingsScreen(
     viewModel: MainViewModel,
     onOpenCapabilityReport: () -> Unit,
+    onBack: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -100,7 +103,28 @@ fun SettingsScreen(
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Text("Settings", style = MaterialTheme.typography.headlineMedium, color = PureWhite)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(42.dp)
+                    .clip(CircleShape)
+                    .background(ElevatedObsidian)
+                    .border(1.dp, HairlineBorder, CircleShape)
+                    .clickable(onClick = onBack)
+                    .testTag("settings_back_button"),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Quay lại Camera",
+                    tint = PureWhite
+                )
+            }
+            Text("Cài đặt Camera", style = MaterialTheme.typography.headlineMedium, color = PureWhite)
+        }
 
         // Device Capability Report Card
         Row(
@@ -213,6 +237,18 @@ fun SettingsScreen(
                 subtitle = "Press Volume Up/Down to trigger shutter",
                 checked = settings.volumeShutterEnabled,
                 onCheckedChange = { v -> viewModel.updateSettings { it.copy(volumeShutterEnabled = v) } }
+            )
+            SettingsToggleRow(
+                title = "Màu gốc rực rỡ tự nhiên (Natural+)",
+                subtitle = "Cân bằng tương phản & dải động da người khi chụp ảnh gốc",
+                checked = settings.naturalColorBoostEnabled,
+                onCheckedChange = { v -> viewModel.updateSettings { it.copy(naturalColorBoostEnabled = v) } }
+            )
+            SettingsToggleRow(
+                title = "Dấu chìm HUNG CAM (Leica Watermark)",
+                subtitle = "Thêm dải thông số tiêu cự, tốc độ màn trập & ISO cuối ảnh",
+                checked = settings.cameraWatermarkEnabled,
+                onCheckedChange = { v -> viewModel.updateSettings { it.copy(cameraWatermarkEnabled = v) } }
             )
         }
 

@@ -706,7 +706,7 @@ class VideoProcessor(private val context: Context) {
             config.applyAiColor
         if (!hasEdits) return null
 
-        val cm = ImageProcessor.buildFilterColorMatrix(config.filter)
+        val cm = ImageProcessor.buildFilterColorMatrix(config.filter, config.filterIntensity)
         val sat = if (config.applyAiColor) (config.saturation * 1.12f).coerceIn(0f, 2f) else config.saturation
         if (abs(sat - 1f) > 0.02f) {
             cm.postConcat(ColorMatrix().apply { setSaturation(sat) })

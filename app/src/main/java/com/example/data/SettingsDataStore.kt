@@ -40,6 +40,8 @@ data class HungCamSettings(
     val gridType: GridType = GridType.RULE_OF_THIRDS,
     val electronicLevelEnabled: Boolean = true,
     val volumeShutterEnabled: Boolean = true,
+    val naturalColorBoostEnabled: Boolean = true,
+    val cameraWatermarkEnabled: Boolean = false,
     // Live Photo settings
     val livePhotoDefaultDuration: LivePhotoDuration = LivePhotoDuration.THREE_SEC,
     val livePhotoSoundEnabled: Boolean = true,
@@ -77,6 +79,8 @@ class SettingsDataStore(private val context: Context) {
         val GRID_TYPE = stringPreferencesKey("grid_type")
         val LEVEL_ENABLED = booleanPreferencesKey("level_enabled")
         val VOLUME_SHUTTER = booleanPreferencesKey("volume_shutter")
+        val NATURAL_COLOR_BOOST = booleanPreferencesKey("natural_color_boost")
+        val CAMERA_WATERMARK = booleanPreferencesKey("camera_watermark")
         val LIVE_DURATION = stringPreferencesKey("live_duration")
         val LIVE_SOUND = booleanPreferencesKey("live_sound")
         val LIVE_LOOP = booleanPreferencesKey("live_loop")
@@ -109,6 +113,8 @@ class SettingsDataStore(private val context: Context) {
             gridType = enumValueOrDefault(prefs[Keys.GRID_TYPE], GridType.RULE_OF_THIRDS),
             electronicLevelEnabled = prefs[Keys.LEVEL_ENABLED] ?: true,
             volumeShutterEnabled = prefs[Keys.VOLUME_SHUTTER] ?: true,
+            naturalColorBoostEnabled = prefs[Keys.NATURAL_COLOR_BOOST] ?: true,
+            cameraWatermarkEnabled = prefs[Keys.CAMERA_WATERMARK] ?: false,
             livePhotoDefaultDuration = enumValueOrDefault(prefs[Keys.LIVE_DURATION], LivePhotoDuration.THREE_SEC),
             livePhotoSoundEnabled = prefs[Keys.LIVE_SOUND] ?: true,
             livePhotoAutoLoopViewer = prefs[Keys.LIVE_LOOP] ?: true,
@@ -143,6 +149,8 @@ class SettingsDataStore(private val context: Context) {
                 gridType = enumValueOrDefault(prefs[Keys.GRID_TYPE], GridType.RULE_OF_THIRDS),
                 electronicLevelEnabled = prefs[Keys.LEVEL_ENABLED] ?: true,
                 volumeShutterEnabled = prefs[Keys.VOLUME_SHUTTER] ?: true,
+                naturalColorBoostEnabled = prefs[Keys.NATURAL_COLOR_BOOST] ?: true,
+                cameraWatermarkEnabled = prefs[Keys.CAMERA_WATERMARK] ?: false,
                 livePhotoDefaultDuration = enumValueOrDefault(prefs[Keys.LIVE_DURATION], LivePhotoDuration.THREE_SEC),
                 livePhotoSoundEnabled = prefs[Keys.LIVE_SOUND] ?: true,
                 livePhotoAutoLoopViewer = prefs[Keys.LIVE_LOOP] ?: true,
@@ -173,6 +181,8 @@ class SettingsDataStore(private val context: Context) {
             prefs[Keys.GRID_TYPE] = next.gridType.name
             prefs[Keys.LEVEL_ENABLED] = next.electronicLevelEnabled
             prefs[Keys.VOLUME_SHUTTER] = next.volumeShutterEnabled
+            prefs[Keys.NATURAL_COLOR_BOOST] = next.naturalColorBoostEnabled
+            prefs[Keys.CAMERA_WATERMARK] = next.cameraWatermarkEnabled
             prefs[Keys.LIVE_DURATION] = next.livePhotoDefaultDuration.name
             prefs[Keys.LIVE_SOUND] = next.livePhotoSoundEnabled
             prefs[Keys.LIVE_LOOP] = next.livePhotoAutoLoopViewer

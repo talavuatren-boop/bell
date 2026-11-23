@@ -18,6 +18,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        requestHighRefreshRateDisplay()
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.BLACK),
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.BLACK)
@@ -27,6 +28,30 @@ class MainActivity : ComponentActivity() {
                 viewModel = viewModel,
                 onDestinationChanged = { dest -> activeTab = dest }
             )
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun requestHighRefreshRateDisplay() {
+        runCatching {
+            val activeDisplay = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                display
+            } else {
+                windowManager.defaultDisplay
+            } ?: return
+            val modes = activeDisplay.supportedModes
+            val currentMode = activeDisplay.mode
+            val bestMode = modes
+                .filter { it.physicalWidth == currentMode.physicalWidth && it.physicalHeight == currentMode.physicalHeight }
+                .maxByOrNull { it.refreshRate }
+            val attrs = window.attributes
+            if (bestMode != null && bestMode.refreshRate >= 60f) {
+                attrs.preferredDisplayModeId = bestMode.modeId
+                attrs.preferredRefreshRate = bestMode.refreshRate
+            } else {
+                attrs.preferredRefreshRate = 60f
+            }
+            window.attributes = attrs
         }
     }
 

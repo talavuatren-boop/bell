@@ -95,6 +95,8 @@ data class CameraRuntimeState(
     val isAudioMuted: Boolean = false,
     val recordingElapsedMs: Long = 0L,
     val activeZoom: Float = 1.0f,
+    val livePhotoCaptureProgress: Float? = null,
+    val livePhotoDurationSec: Int = 0,
     val livePhotoFallbackNotice: String? = null,
     val statusBanner: String? = null,
     val errorMessage: String? = null
@@ -158,7 +160,9 @@ class CameraEngine(
     private var currentTimelapseSpeed: TimelapseSpeed = TimelapseSpeed.X5
     private var currentSlowMoOption: SlowMoOption? = null
     private var currentFilter: PhotoFilterPreset = PhotoFilterPreset.NATURAL
+    private var currentFilterIntensity: Float = 0.88f
     private var activeRecordingFilter: PhotoFilterPreset = PhotoFilterPreset.NATURAL
+    private var activeRecordingFilterIntensity: Float = 0.88f
     private var currentZoomRatio: Float = 1.0f
     private var zoomAnimationJob: Job? = null
     private var displayRotationDegrees: Int = 0
@@ -310,11 +314,11 @@ class CameraEngine(
         }
         zoomAnimationJob?.cancel()
         zoomAnimationJob = scope.launch {
-            val steps = 12
-            val stepDelay = (durationMs / steps).coerceAtLeast(12L)
+            val steps = 15
+            val stepDelay = (durationMs / steps).coerceAtLeast(16L)
             for (i in 1..steps) {
                 val t = i.toFloat() / steps.toFloat()
-                // Smooth cubic ease-out curve for optical zoom glide
+                // Smooth cubic ease-out curve at ~60fps for optical zoom glide
                 val eased = 1f - (1f - t) * (1f - t) * (1f - t)
                 val z = startZoom + (clampedTarget - startZoom) * eased
                 currentZoomRatio = z.coerceIn(lens.minZoom, lens.maxZoom)
@@ -343,8 +347,9 @@ class CameraEngine(
         applyRepeatingRequestChanges()
     }
 
-    fun updateCameraFilter(filter: PhotoFilterPreset) {
+    fun updateCameraFilter(filter: PhotoFilterPreset, intensity: Float = currentFilterIntensity) {
         currentFilter = filter
+        currentFilterIntensity = intensity.coerceIn(0f, 1f)
     }
 
     fun toggleRecordingAudioMute(): Boolean {
@@ -681,8 +686,9 @@ class CameraEngine(
             val buf = LivePhotoRingBuffer(
                 width = liveSize.width,
                 height = liveSize.height,
-                bitrateBps = if (currentSettings.livePhotoHighBitrate) 16_000_000 else 10_000_000,
-                fps = 30
+                bitrateBps = if (currentSettings.livePhotoHighBitrate) 14_000_000 else 9_000_000,
+                fps = 30,
+                maxBufferSeconds = 14
             )
             if (buf.start(enableAudio = currentSettings.livePhotoSoundEnabled)) {
                 livePhotoBuffer = buf
@@ -1047,15 +1053,22 @@ class CameraEngine(
             }
         }
         val capturedFilter = currentFilter
+        val capturedFilterIntensity = currentFilterIntensity
+        val wantNaturalToneBoost = currentSettings.naturalColorBoostEnabled && capturedFilter == PhotoFilterPreset.NATURAL
+        val wantWatermark = currentSettings.cameraWatermarkEnabled && !currentProParams.captureRawDng
         pendingStillCaptures.add(
             PendingStillCaptureMeta(
                 pairId = pairId,
+                liveDurationSec = if (pairId != null) currentLiveDuration.seconds else 0,
                 targetUprightAspect = targetUprightAspect,
                 isPortraitBokeh = isPortraitCapture,
                 portraitBokehStrength = currentPortraitBokeh,
                 portraitFocusX = portraitFocusX,
                 portraitFocusY = portraitFocusY,
-                filterPreset = capturedFilter
+                filterPreset = capturedFilter,
+                filterIntensity = capturedFilterIntensity,
+                applyNaturalToneBoost = wantNaturalToneBoost,
+                applyWatermark = wantWatermark
             )
         )
 
@@ -1066,7 +1079,7 @@ class CameraEngine(
                     pendingRawCaptureResult = result
                     tryFinalizeRawCapture()
                     if (pairId != null) {
-                        finalizeLivePhotoClip(pairId, shutterMonotonicUs, capturedOrientation, capturedFilter)
+                        finalizeLivePhotoClip(pairId, shutterMonotonicUs, capturedOrientation, capturedFilter, capturedFilterIntensity)
                     }
                 }
 
@@ -1093,7 +1106,8 @@ class CameraEngine(
         pairId: String,
         shutterMonotonicUs: Long,
         orientationHint: Int,
-        filterPreset: PhotoFilterPreset
+        filterPreset: PhotoFilterPreset,
+        filterIntensity: Float
     ) {
         val ring = livePhotoBuffer ?: return
         val durSec = if (currentLiveDuration == LivePhotoDuration.OFF) 3 else currentLiveDuration.seconds
@@ -1102,9 +1116,27 @@ class CameraEngine(
         scope.launch(Dispatchers.IO) {
             var filteredFile: File? = null
             var stagedToDelete: File? = null
-            val clipRes = ring.captureClipAroundShutter(durSec, shutterMonotonicUs, tempFile, orientationHint)
+            _runtimeState.value = _runtimeState.value.copy(
+                livePhotoCaptureProgress = 0.04f,
+                livePhotoDurationSec = durSec
+            )
+            val clipRes = ring.captureClipAroundShutter(
+                durationSeconds = durSec,
+                shutterMonotonicUs = shutterMonotonicUs,
+                outputFile = tempFile,
+                orientationHint = orientationHint,
+                onPostShutterProgress = { progress ->
+                    val current = _runtimeState.value
+                    if (current.livePhotoCaptureProgress != progress) {
+                        _runtimeState.value = current.copy(
+                            livePhotoCaptureProgress = progress,
+                            livePhotoDurationSec = durSec
+                        )
+                    }
+                }
+            )
             clipRes.onSuccess { clip ->
-                val uploadFile = if (filterPreset != PhotoFilterPreset.NATURAL) {
+                val uploadFile = if (filterPreset != PhotoFilterPreset.NATURAL && filterIntensity > 0.02f) {
                     runCatching {
                         val vp = VideoProcessor(context)
                         val res = vp.processVideo(
@@ -1114,6 +1146,7 @@ class CameraEngine(
                                 targetFps = 30,
                                 muteAudio = !clip.hasAudio,
                                 filter = filterPreset,
+                                filterIntensity = filterIntensity,
                                 preserveSourceAspect = true
                             ),
                             mode = AiProcessingMode.FAST,
@@ -1184,13 +1217,22 @@ class CameraEngine(
                             )
                             saved.onSuccess {
                                 _runtimeState.value = _runtimeState.value.copy(
+                                    livePhotoCaptureProgress = null,
+                                    livePhotoDurationSec = 0,
                                     statusBanner = "Saved Live Photo (${String.format("%.1fs", clip.totalDurationMs / 1000f)})"
                                 )
                             }.onFailure { err ->
                                 _runtimeState.value = _runtimeState.value.copy(
+                                    livePhotoCaptureProgress = null,
+                                    livePhotoDurationSec = 0,
                                     errorMessage = err.localizedMessage
                                 )
                             }
+                        } else {
+                            _runtimeState.value = _runtimeState.value.copy(
+                                livePhotoCaptureProgress = null,
+                                livePhotoDurationSec = 0
+                            )
                         }
                     } else if (existingAsset != null) {
                         val existing = existingAsset!!
@@ -1209,16 +1251,31 @@ class CameraEngine(
                             shutterOffsetUs = clip.shutterOffsetMs * 1000L
                         )
                         _runtimeState.value = _runtimeState.value.copy(
+                            livePhotoCaptureProgress = null,
+                            livePhotoDurationSec = 0,
                             statusBanner = "Saved Live Photo (${String.format("%.1fs", clip.totalDurationMs / 1000f)})"
+                        )
+                    } else {
+                        _runtimeState.value = _runtimeState.value.copy(
+                            livePhotoCaptureProgress = null,
+                            livePhotoDurationSec = 0
                         )
                     }
                 }.onFailure {
+                    _runtimeState.value = _runtimeState.value.copy(
+                        livePhotoCaptureProgress = null,
+                        livePhotoDurationSec = 0
+                    )
                     flushStagedStillAsFallback(pairId, notice = null)
                 }
                 runCatching { stagedToDelete?.delete() }
                 runCatching { filteredFile?.delete() }
                 runCatching { tempFile.delete() }
             }.onFailure { err ->
+                _runtimeState.value = _runtimeState.value.copy(
+                    livePhotoCaptureProgress = null,
+                    livePhotoDurationSec = 0
+                )
                 flushStagedStillAsFallback(pairId, notice = "Live clip notice: ${err.message}")
                 runCatching { filteredFile?.delete() }
                 runCatching { tempFile.delete() }
@@ -1274,12 +1331,16 @@ class CameraEngine(
 
     private data class PendingStillCaptureMeta(
         val pairId: String?,
+        val liveDurationSec: Int = 0,
         val targetUprightAspect: Float,
         val isPortraitBokeh: Boolean = false,
         val portraitBokehStrength: Float = 0.55f,
         val portraitFocusX: Float = 0.5f,
         val portraitFocusY: Float = 0.42f,
-        val filterPreset: PhotoFilterPreset = PhotoFilterPreset.NATURAL
+        val filterPreset: PhotoFilterPreset = PhotoFilterPreset.NATURAL,
+        val filterIntensity: Float = 0.88f,
+        val applyNaturalToneBoost: Boolean = false,
+        val applyWatermark: Boolean = false
     )
 
     private val pendingLiveClips = java.util.concurrent.ConcurrentHashMap<String, PendingLiveClipMeta>()
@@ -1311,6 +1372,7 @@ class CameraEngine(
         val rawMime = if (format == ImageFormat.HEIC) "image/heic" else "image/jpeg"
 
         val appliedFilter = captureMeta?.filterPreset ?: PhotoFilterPreset.NATURAL
+        val appliedIntensity = captureMeta?.filterIntensity ?: 0.88f
 
         scope.launch(Dispatchers.IO) {
             val postProcessed = processStillBytesForAspectAndPortrait(
@@ -1320,7 +1382,14 @@ class CameraEngine(
                 bokehStrength = captureMeta?.portraitBokehStrength ?: 0f,
                 focusX = captureMeta?.portraitFocusX ?: 0.5f,
                 focusY = captureMeta?.portraitFocusY ?: 0.42f,
-                filterPreset = appliedFilter
+                filterPreset = appliedFilter,
+                filterIntensity = appliedIntensity,
+                applyNaturalToneBoost = captureMeta?.applyNaturalToneBoost == true,
+                applyWatermark = captureMeta?.applyWatermark == true,
+                lensLabelWatermark = lens?.displayLabel ?: "Main",
+                isoWatermark = iso,
+                expWatermark = exp,
+                focalMmWatermark = lens?.focalLengthMm
             )
             val finalBytes = postProcessed?.first ?: rawBytes
             val finalW = postProcessed?.second ?: w
@@ -1367,13 +1436,15 @@ class CameraEngine(
             captureWatchdogJob?.cancel()
 
             if (stagedForClip && queuedPairId != null) {
+                val durLabel = captureMeta?.liveDurationSec?.takeIf { it > 0 }?.let { "${it}s" } ?: ""
                 _runtimeState.value = _runtimeState.value.copy(
                     isCapturing = false,
-                    statusBanner = "Packaging Live Photo..."
+                    statusBanner = if (durLabel.isNotEmpty()) "Đang lưu Live Photo $durLabel..." else "Đang lưu Live Photo..."
                 )
-                // Safety watchdog: never leave staged still unpublished if ring buffer fails/stalls
+                // Safety watchdog: scale timeout to support up to 10s Live Photo + filter transcode cleanly
+                val fallbackTimeoutMs = maxOf(16_000L, ((captureMeta?.liveDurationSec ?: 3) + 12) * 1000L)
                 scope.launch(Dispatchers.IO) {
-                    delay(15_000L)
+                    delay(fallbackTimeoutMs)
                     flushStagedStillAsFallback(queuedPairId, notice = "Live Photo timeout — saved still photo")
                 }
                 return@launch
@@ -1442,7 +1513,14 @@ class CameraEngine(
         bokehStrength: Float,
         focusX: Float,
         focusY: Float,
-        filterPreset: PhotoFilterPreset
+        filterPreset: PhotoFilterPreset,
+        filterIntensity: Float,
+        applyNaturalToneBoost: Boolean,
+        applyWatermark: Boolean,
+        lensLabelWatermark: String,
+        isoWatermark: Int?,
+        expWatermark: Long?,
+        focalMmWatermark: Float?
     ): Triple<ByteArray, Int, Int>? {
         return runCatching {
             val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -1465,7 +1543,12 @@ class CameraEngine(
             val actualAspect = uprightW.toFloat() / uprightH.toFloat().coerceAtLeast(1f)
             val needsAspectCrop = targetUprightAspect != null && targetUprightAspect > 0f &&
                 abs(actualAspect - targetUprightAspect) > 0.04f
-            if (!needsAspectCrop && !isPortraitBokeh && filterPreset == PhotoFilterPreset.NATURAL) {
+            if (!needsAspectCrop &&
+                !isPortraitBokeh &&
+                filterPreset == PhotoFilterPreset.NATURAL &&
+                !applyNaturalToneBoost &&
+                !applyWatermark
+            ) {
                 return null
             }
 
@@ -1510,12 +1593,32 @@ class CameraEngine(
                 cropped
             }
 
-            val finalBmp = if (filterPreset != PhotoFilterPreset.NATURAL) {
-                ImageProcessor.applyFilterToBitmap(bokehApplied, filterPreset).also {
-                    if (it !== bokehApplied) bokehApplied.recycle()
+            val colorStyledBmp = when {
+                filterPreset != PhotoFilterPreset.NATURAL && filterIntensity > 0.01f -> {
+                    ImageProcessor.applyFilterToBitmap(bokehApplied, filterPreset, filterIntensity).also {
+                        if (it !== bokehApplied) bokehApplied.recycle()
+                    }
+                }
+                applyNaturalToneBoost -> {
+                    ImageProcessor.applyFlagshipNaturalTone(bokehApplied).also {
+                        if (it !== bokehApplied) bokehApplied.recycle()
+                    }
+                }
+                else -> bokehApplied
+            }
+
+            val finalBmp = if (applyWatermark) {
+                ImageProcessor.applyCameraWatermark(
+                    source = colorStyledBmp,
+                    lensLabel = lensLabelWatermark,
+                    iso = isoWatermark,
+                    exposureNs = expWatermark,
+                    focalMm = focalMmWatermark
+                ).also {
+                    if (it !== colorStyledBmp) colorStyledBmp.recycle()
                 }
             } else {
-                bokehApplied
+                colorStyledBmp
             }
 
             val out = ByteArrayOutputStream()
@@ -1648,6 +1751,7 @@ class CameraEngine(
         activeVideoFps = targetFps
         activeVideoBitrate = bitrate
         activeRecordingFilter = currentFilter
+        activeRecordingFilterIntensity = currentFilterIntensity
 
         runCatching { captureSession?.close() }
         captureSession = null
@@ -1823,6 +1927,7 @@ class CameraEngine(
         if (videoFile != null && videoFile.exists() && videoFile.length() > 1024L) {
             val nonNullVideoFile: File = videoFile
             val recFilter = activeRecordingFilter
+            val recFilterIntensity = activeRecordingFilterIntensity
             val recMuted = _runtimeState.value.isAudioMuted
             scope.launch(Dispatchers.IO) {
                 var finalVideoFile: File = nonNullVideoFile
@@ -1833,7 +1938,7 @@ class CameraEngine(
                 var outBitrate = activeVideoBitrate
 
                 var filterNotice: String? = null
-                if (recFilter != PhotoFilterPreset.NATURAL) {
+                if (recFilter != PhotoFilterPreset.NATURAL && recFilterIntensity > 0.02f) {
                     _runtimeState.value = _runtimeState.value.copy(
                         statusBanner = "Applying ${recFilter.label} filter to video..."
                     )
@@ -1851,6 +1956,7 @@ class CameraEngine(
                                 targetFps = activeVideoFps.coerceIn(24, 60),
                                 muteAudio = recMuted,
                                 filter = recFilter,
+                                filterIntensity = recFilterIntensity,
                                 preserveSourceAspect = true
                             ),
                             mode = AiProcessingMode.BALANCED,

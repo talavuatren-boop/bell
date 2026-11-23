@@ -315,6 +315,33 @@ fun VideoEditorScreen(
                 )
             }
 
+            // Leica & Film Filters for Video Export
+            Text("Leica & Camera Filters", style = MaterialTheme.typography.titleMedium, color = PureWhite)
+            Row(
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                com.example.model.PhotoFilterPreset.entries.forEach { preset ->
+                    val selected = config.filter == preset
+                    Text(
+                        text = preset.label,
+                        style = MonoTelemetrySmall,
+                        color = if (selected) PureBlack else PureWhite,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (selected) accent else CardSlate)
+                            .clickable { config = config.copy(filter = preset) }
+                            .padding(horizontal = 12.dp, vertical = 7.dp)
+                            .testTag("video_editor_filter_${preset.name.lowercase()}")
+                    )
+                }
+            }
+            if (config.filter != com.example.model.PhotoFilterPreset.NATURAL) {
+                LabeledVideoSlider("Cường độ bộ lọc", config.filterIntensity, 0.15f..1f) {
+                    config = config.copy(filterIntensity = it)
+                }
+            }
+
             // Color Adjustment Sliders
             Text("Color & Exposure", style = MaterialTheme.typography.titleMedium, color = PureWhite)
             LabeledVideoSlider("Brightness", config.brightness, -0.4f..0.4f) { config = config.copy(brightness = it) }

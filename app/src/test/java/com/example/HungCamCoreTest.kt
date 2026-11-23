@@ -14,6 +14,7 @@ import com.example.model.AiProcessingMode
 import com.example.model.AiToolType
 import com.example.model.CameraMode
 import com.example.model.CropAspectPreset
+import com.example.model.LivePhotoDuration
 import com.example.model.MediaItemType
 import com.example.model.MemeCaptionConfig
 import com.example.model.PhotoEditAdjustments
@@ -191,16 +192,18 @@ class HungCamCoreTest {
     }
 
     @Test
-    fun `live photo ring buffer selects full 2s 3s and 5s windows around shutter`() {
-        // Simulate 8 seconds at 30fps (240 frames, keyframe every 15 frames = 500ms)
-        val totalFrames = 240
+    fun `live photo ring buffer selects full 2s 3s 5s and 10s windows around shutter`() {
+        // Simulate 14 seconds at 30fps (420 frames, keyframe every 15 frames = 500ms)
+        val totalFrames = 420
         val stepUs = 33_333L
         val baseWallUs = 10_000_000L
         val wallTimes = List(totalFrames) { i -> baseWallUs + i * stepUs }
         val keyFrames = List(totalFrames) { i -> i % 15 == 0 }
-        val shutterWallUs = baseWallUs + 120 * stepUs // t = 4.0s
+        val shutterWallUs = baseWallUs + 210 * stepUs // t = 7.0s
 
-        for (durSec in listOf(2, 3, 5)) {
+        assertTrue(LivePhotoDuration.entries.any { it.seconds == 10 && it.label == "10s" })
+
+        for (durSec in listOf(2, 3, 5, 10)) {
             val range = LivePhotoRingBuffer.selectWindowIndices(
                 wallTimesUs = wallTimes,
                 isKeyFrames = keyFrames,
@@ -567,5 +570,42 @@ class HungCamCoreTest {
         java.io.File(uri.path!!).delete()
         tempFile.delete()
         db.close()
+    }
+
+    @Test
+    fun `leica and flagship camera filters transform bitmaps cleanly with intensity and natural base tone`() {
+        val src = Bitmap.createBitmap(32, 24, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(android.graphics.Color.rgb(180, 120, 90))
+        }
+
+        val leicaPresets = PhotoFilterPreset.entries.filter { it.isLeica }
+        assertTrue("Expected at least 6 Leica filter presets", leicaPresets.size >= 6)
+
+        for (preset in PhotoFilterPreset.entries) {
+            val out = ImageProcessor.applyFilterToBitmap(src, preset, intensity = 0.85f)
+            assertEquals(32, out.width)
+            assertEquals(24, out.height)
+            if (preset == PhotoFilterPreset.LEICA_BW_NAT || preset == PhotoFilterPreset.LEICA_BW_HC) {
+                val px = out.getPixel(16, 12)
+                val r = (px shr 16) and 0xFF
+                val g = (px shr 8) and 0xFF
+                val b = px and 0xFF
+                assertTrue("Expected grayscale channels at high intensity, got R=$r G=$g B=$b", kotlin.math.abs(r - g) <= 25 && kotlin.math.abs(g - b) <= 25)
+            }
+        }
+
+        val toneOut = ImageProcessor.applyFlagshipNaturalTone(src)
+        assertEquals(32, toneOut.width)
+        assertEquals(24, toneOut.height)
+
+        val watermarked = ImageProcessor.applyCameraWatermark(
+            source = toneOut,
+            lensLabel = "1x 23mm",
+            iso = 100,
+            exposureNs = 8_000_000L,
+            focalMm = 23f
+        )
+        assertEquals(32, watermarked.width)
+        assertTrue("Expected watermark bar added below photo", watermarked.height > 24)
     }
 }
