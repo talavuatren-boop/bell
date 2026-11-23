@@ -12,7 +12,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.shape.RoundedCornerShape
 import com.example.model.AccentColorPreset
 
-val LocalAccentColor = staticCompositionLocalOf { LeicaAmber }
+val LocalAccentColor = staticCompositionLocalOf { CrimsonLeica }
+val LocalOnAccentColor = staticCompositionLocalOf { PureWhite }
 
 private val HungCamShapes = Shapes(
     extraSmall = RoundedCornerShape(6.dp),
@@ -25,20 +26,24 @@ private val HungCamShapes = Shapes(
 @Composable
 fun HungCamTheme(
     darkTheme: Boolean = true,
-    accentPreset: AccentColorPreset = AccentColorPreset.LEICA_AMBER,
+    accentPreset: AccentColorPreset = AccentColorPreset.CRIMSON_PRO,
     content: @Composable () -> Unit
 ) {
     val accent = when (accentPreset) {
-        AccentColorPreset.LEICA_AMBER -> LeicaAmber
+        AccentColorPreset.CRIMSON_PRO -> CrimsonLeica
+        AccentColorPreset.PURE_WHITE -> PureWhite
         AccentColorPreset.ELECTRIC_CYAN -> ElectricCyan
-        AccentColorPreset.CRIMSON_PRO -> CrimsonShutter
         AccentColorPreset.EMERALD -> EmeraldOptical
+    }
+    val onAccent = when (accentPreset) {
+        AccentColorPreset.PURE_WHITE, AccentColorPreset.ELECTRIC_CYAN -> PureBlack
+        AccentColorPreset.CRIMSON_PRO, AccentColorPreset.EMERALD -> PureWhite
     }
 
     val colorScheme = if (darkTheme) {
         darkColorScheme(
             primary = accent,
-            onPrimary = PureBlack,
+            onPrimary = onAccent,
             primaryContainer = ElevatedObsidian,
             onPrimaryContainer = PureWhite,
             secondary = SoftWhite,
@@ -59,7 +64,7 @@ fun HungCamTheme(
     } else {
         lightColorScheme(
             primary = accent,
-            onPrimary = PureBlack,
+            onPrimary = onAccent,
             background = Color(0xFFF5F6F8),
             onBackground = Color(0xFF0E1015),
             surface = PureWhite,
@@ -72,7 +77,10 @@ fun HungCamTheme(
         )
     }
 
-    CompositionLocalProvider(LocalAccentColor provides accent) {
+    CompositionLocalProvider(
+        LocalAccentColor provides accent,
+        LocalOnAccentColor provides onAccent
+    ) {
         MaterialTheme(
             colorScheme = colorScheme,
             typography = HungCamTypography,

@@ -65,47 +65,49 @@ val LocalAnimationsEnabled = staticCompositionLocalOf { true }
  * 60fps+ physics-based motion tokens tuned for zero-jank GPU-backed UI transitions.
  */
 object HungCamMotion {
+    val EmphasizedDecelerate = androidx.compose.animation.core.CubicBezierEasing(0.22f, 1f, 0.36f, 1f)
+
     val fastSpringFloat = spring<Float>(
-        dampingRatio = 0.80f,
-        stiffness = 520f
+        dampingRatio = 0.84f,
+        stiffness = 420f
     )
     val bouncySpringFloat = spring<Float>(
-        dampingRatio = Spring.DampingRatioMediumBouncy,
-        stiffness = 460f
+        dampingRatio = 0.74f,
+        stiffness = 390f
     )
     val drawerSpringOffset = spring<IntOffset>(
-        dampingRatio = 0.84f,
-        stiffness = 440f
+        dampingRatio = 0.86f,
+        stiffness = 360f
     )
     val smoothAspectSpring = spring<Float>(
         dampingRatio = 0.88f,
-        stiffness = 380f
+        stiffness = 320f
     )
 
     fun panelEnter(animationsEnabled: Boolean): EnterTransition {
         if (!animationsEnabled) return EnterTransition.None
-        return fadeIn(tween(170, easing = FastOutSlowInEasing)) +
-            slideInVertically(animationSpec = drawerSpringOffset) { it / 5 } +
+        return fadeIn(tween(220, easing = EmphasizedDecelerate)) +
+            slideInVertically(animationSpec = drawerSpringOffset) { it / 6 } +
             scaleIn(initialScale = 0.94f, animationSpec = fastSpringFloat)
     }
 
     fun panelExit(animationsEnabled: Boolean): ExitTransition {
         if (!animationsEnabled) return ExitTransition.None
-        return fadeOut(tween(130, easing = FastOutSlowInEasing)) +
-            slideOutVertically(animationSpec = tween(150, easing = FastOutSlowInEasing)) { it / 6 } +
-            scaleOut(targetScale = 0.95f, animationSpec = tween(130))
+        return fadeOut(tween(180, easing = EmphasizedDecelerate)) +
+            slideOutVertically(animationSpec = tween(200, easing = EmphasizedDecelerate)) { it / 6 } +
+            scaleOut(targetScale = 0.95f, animationSpec = tween(180, easing = EmphasizedDecelerate))
     }
 
     fun sheetEnter(animationsEnabled: Boolean): EnterTransition {
         if (!animationsEnabled) return EnterTransition.None
-        return fadeIn(tween(180)) +
+        return fadeIn(tween(240, easing = EmphasizedDecelerate)) +
             slideInVertically(animationSpec = drawerSpringOffset) { it / 2 }
     }
 
     fun sheetExit(animationsEnabled: Boolean): ExitTransition {
         if (!animationsEnabled) return ExitTransition.None
-        return fadeOut(tween(140)) +
-            slideOutVertically(animationSpec = tween(170, easing = FastOutSlowInEasing)) { it / 2 }
+        return fadeOut(tween(190, easing = EmphasizedDecelerate)) +
+            slideOutVertically(animationSpec = tween(220, easing = EmphasizedDecelerate)) { it / 2 }
     }
 
     fun screenTransition(forward: Boolean, animationsEnabled: Boolean): ContentTransform {
@@ -114,12 +116,12 @@ object HungCamMotion {
         }
         val sign = if (forward) 1 else -1
         return (
-            slideInHorizontally(animationSpec = tween(230, easing = FastOutSlowInEasing)) { w -> sign * (w / 6) } +
-                fadeIn(tween(210, easing = FastOutSlowInEasing)) +
-                scaleIn(initialScale = 0.97f, animationSpec = tween(230, easing = FastOutSlowInEasing))
+            slideInHorizontally(animationSpec = tween(280, easing = EmphasizedDecelerate)) { w -> sign * (w / 7) } +
+                fadeIn(tween(250, easing = EmphasizedDecelerate)) +
+                scaleIn(initialScale = 0.97f, animationSpec = tween(280, easing = EmphasizedDecelerate))
             ) togetherWith (
-            slideOutHorizontally(animationSpec = tween(200, easing = FastOutSlowInEasing)) { w -> -sign * (w / 10) } +
-                fadeOut(tween(170, easing = FastOutSlowInEasing))
+            slideOutHorizontally(animationSpec = tween(230, easing = EmphasizedDecelerate)) { w -> -sign * (w / 10) } +
+                fadeOut(tween(200, easing = EmphasizedDecelerate))
             )
     }
 }

@@ -814,6 +814,35 @@ object ImageProcessor {
                 )
             )
             PhotoFilterPreset.BW -> target.setSaturation(0f)
+            else -> {
+                val spec = preset.grade
+                if (spec != null) {
+                    val c = spec.contrast
+                    val pivot = 128f * (1f - c) + spec.exposureBias + spec.shadowFade
+                    if (spec.isMonochrome) {
+                        target.set(
+                            floatArrayOf(
+                                0.34f * c * spec.rGain, 0.48f * c * spec.rGain, 0.18f * c * spec.rGain, 0f, pivot + spec.rWarmBias,
+                                0.34f * c * spec.gGain, 0.48f * c * spec.gGain, 0.18f * c * spec.gGain, 0f, pivot + spec.gWarmBias,
+                                0.34f * c * spec.bGain, 0.48f * c * spec.bGain, 0.18f * c * spec.bGain, 0f, pivot + spec.bWarmBias,
+                                0f, 0f, 0f, 1f, 0f
+                            )
+                        )
+                    } else {
+                        target.setSaturation(spec.saturation)
+                        target.postConcat(
+                            ColorMatrix(
+                                floatArrayOf(
+                                    c * spec.rGain, spec.rgCross, 0f, 0f, pivot + spec.rWarmBias,
+                                    0f, c * spec.gGain, spec.gbCross, 0f, pivot + spec.gWarmBias,
+                                    0f, 0f, c * spec.bGain, 0f, pivot + spec.bWarmBias,
+                                    0f, 0f, 0f, 1f, 0f
+                                )
+                            )
+                        )
+                    }
+                }
+            }
         }
         if (t >= 0.995f) {
             cm.set(target)

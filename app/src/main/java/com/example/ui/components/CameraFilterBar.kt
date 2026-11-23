@@ -1,5 +1,7 @@
 package com.example.ui.components
 
+import android.content.Context
+import android.graphics.BitmapFactory
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
@@ -8,6 +10,7 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -17,12 +20,15 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -31,6 +37,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -40,15 +47,24 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.R
 import com.example.model.FilterCategory
+import com.example.model.FilterSampleSubject
 import com.example.model.PhotoFilterPreset
-import com.example.ui.theme.CrimsonShutter
+import com.example.processing.ImageProcessor
+import com.example.ui.theme.CrimsonLeica
 import com.example.ui.theme.ElevatedObsidian
 import com.example.ui.theme.HairlineBorder
 import com.example.ui.theme.LocalAccentColor
@@ -56,6 +72,103 @@ import com.example.ui.theme.MonoTelemetrySmall
 import com.example.ui.theme.MutedSlate
 import com.example.ui.theme.PureBlack
 import com.example.ui.theme.PureWhite
+import java.util.EnumMap
+
+enum class FilterShelfTab(val label: String, val isLeicaDot: Boolean) {
+    ALL("Tất cả", false),
+    LEICA_WARM("Leica Ấm", true),
+    LEICA("Leica", true),
+    STANDARD("Thường", false);
+
+    fun filterPresets(): List<PhotoFilterPreset> = when (this) {
+        ALL -> PhotoFilterPreset.entries
+        LEICA_WARM -> listOf(PhotoFilterPreset.NATURAL) +
+            PhotoFilterPreset.entries.filter { it.isLeica && it.isWarm }
+        LEICA -> listOf(PhotoFilterPreset.NATURAL) +
+            PhotoFilterPreset.entries.filter { it.category == FilterCategory.LEICA }
+        STANDARD -> listOf(PhotoFilterPreset.NATURAL) +
+            PhotoFilterPreset.entries.filter { it.category == FilterCategory.FILM }
+    }
+}
+
+private object FilterSamplePreviewCache {
+    private val bitmapCache = EnumMap<FilterSampleSubject, ImageBitmap>(FilterSampleSubject::class.java)
+    private val colorFilterCache = EnumMap<PhotoFilterPreset, ColorFilter>(PhotoFilterPreset::class.java)
+
+    fun getSampleImage(context: Context, subject: FilterSampleSubject): ImageBitmap? {
+        bitmapCache[subject]?.let { return it }
+        val resId = when (subject) {
+            FilterSampleSubject.STREET_GOLDEN -> R.drawable.img_filter_golden_street
+            FilterSampleSubject.PORTRAIT_SKIN -> R.drawable.img_filter_portrait_warm
+            FilterSampleSubject.CAFE_ANALOG -> R.drawable.img_filter_cafe_coffee
+            FilterSampleSubject.SCENIC_BLUE -> R.drawable.img_filter_scenic_blue
+        }
+        val opts = BitmapFactory.Options().apply { inSampleSize = 4 }
+        val decoded = BitmapFactory.decodeResource(context.resources, resId, opts)?.asImageBitmap()
+        if (decoded != null) {
+            bitmapCache[subject] = decoded
+        }
+        return decoded
+    }
+
+    fun getColorFilter(preset: PhotoFilterPreset): ColorFilter? {
+        if (preset == PhotoFilterPreset.NATURAL) return null
+        colorFilterCache[preset]?.let { return it }
+        val cm = ColorMatrix(ImageProcessor.buildFilterColorMatrix(preset, 1f).array)
+        return ColorFilter.colorMatrix(cm).also { colorFilterCache[preset] = it }
+    }
+}
+
+@Composable
+fun FilterPreviewThumb(
+    preset: PhotoFilterPreset,
+    selected: Boolean,
+    accent: Color,
+    size: Dp = 52.dp,
+    cornerRadius: Dp = 12.dp
+) {
+    val context = LocalContext.current
+    val sampleBitmap = remember(preset.sampleSubject) {
+        FilterSamplePreviewCache.getSampleImage(context, preset.sampleSubject)
+    }
+    val filterColor = remember(preset) {
+        FilterSamplePreviewCache.getColorFilter(preset)
+    }
+    val shape = RoundedCornerShape(cornerRadius)
+
+    Box(
+        modifier = Modifier
+            .size(size)
+            .clip(shape)
+            .background(Brush.linearGradient(preset.swatchColors))
+            .border(
+                width = if (selected) 2.dp else 0.75.dp,
+                color = if (selected) accent else PureWhite.copy(alpha = 0.22f),
+                shape = shape
+            )
+    ) {
+        if (sampleBitmap != null) {
+            Image(
+                bitmap = sampleBitmap,
+                contentDescription = preset.label,
+                contentScale = ContentScale.Crop,
+                colorFilter = filterColor,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+        if (preset.isLeica) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(3.dp)
+                    .size(8.dp)
+                    .clip(CircleShape)
+                    .background(CrimsonLeica)
+                    .border(1.dp, PureWhite, CircleShape)
+            )
+        }
+    }
+}
 
 @Composable
 fun CameraFilterBar(
@@ -70,9 +183,20 @@ fun CameraFilterBar(
     modifier: Modifier = Modifier
 ) {
     val accent = LocalAccentColor.current
-    var categoryFilter by remember { mutableStateOf<FilterCategory?>(null) }
-
+    var shelfTab by remember { mutableStateOf(FilterShelfTab.ALL) }
     val animEnabled = LocalAnimationsEnabled.current
+    val listState = rememberLazyListState()
+
+    val displayedPresets = remember(shelfTab) { shelfTab.filterPresets() }
+
+    LaunchedEffect(visible, shelfTab) {
+        if (visible) {
+            val idx = displayedPresets.indexOf(activeFilter)
+            if (idx > 2) {
+                listState.scrollToItem((idx - 2).coerceAtLeast(0))
+            }
+        }
+    }
 
     AnimatedVisibility(
         visible = visible,
@@ -90,34 +214,28 @@ fun CameraFilterBar(
                 .testTag("camera_filter_carousel"),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            // Top bar: All / Leica / Film category pills + Natural Base Tone+ toggle
+            // Top bar: Filter category tabs (All / Leica Ấm / Leica / Thường) + Natural Base Tone+ toggle
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    FilterGroupChip(
-                        label = "Tất cả",
-                        selected = categoryFilter == null,
-                        isLeicaDot = false,
-                        onClick = { categoryFilter = null }
-                    )
-                    FilterGroupChip(
-                        label = "Leica",
-                        selected = categoryFilter == FilterCategory.LEICA,
-                        isLeicaDot = true,
-                        onClick = { categoryFilter = FilterCategory.LEICA }
-                    )
-                    FilterGroupChip(
-                        label = "Máy ảnh",
-                        selected = categoryFilter == FilterCategory.FILM,
-                        isLeicaDot = false,
-                        onClick = { categoryFilter = FilterCategory.FILM }
-                    )
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    FilterShelfTab.entries.forEach { tab ->
+                        FilterGroupChip(
+                            label = "${tab.label} (${if (tab == FilterShelfTab.ALL) PhotoFilterPreset.entries.size else tab.filterPresets().size - 1})",
+                            selected = shelfTab == tab,
+                            isLeicaDot = tab.isLeicaDot,
+                            onClick = { shelfTab = tab }
+                        )
+                    }
                 }
 
-                // "Màu gốc đẹp+" quick toggle right inside filter bar
                 val boostInteraction = remember { MutableInteractionSource() }
                 Row(
                     modifier = Modifier
@@ -146,36 +264,27 @@ fun CameraFilterBar(
                     Text(
                         text = if (naturalBoostEnabled) "Màu gốc+" else "Gốc thô",
                         style = MonoTelemetrySmall.copy(fontSize = 10.sp, fontWeight = FontWeight.SemiBold),
-                        color = if (naturalBoostEnabled) accent else MutedSlate
+                        color = if (naturalBoostEnabled) accent else MutedSlate,
+                        softWrap = false
                     )
                 }
             }
 
-            // Scrollable Swatch Carousel
-            val displayedPresets = remember(categoryFilter) {
-                when (categoryFilter) {
-                    null -> PhotoFilterPreset.entries
-                    FilterCategory.LEICA -> listOf(PhotoFilterPreset.NATURAL) +
-                        PhotoFilterPreset.entries.filter { it.category == FilterCategory.LEICA }
-                    FilterCategory.FILM -> listOf(PhotoFilterPreset.NATURAL) +
-                        PhotoFilterPreset.entries.filter { it.category == FilterCategory.FILM }
-                    FilterCategory.BASE -> listOf(PhotoFilterPreset.NATURAL)
-                }
-            }
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
+            // Virtualized 60fps Photographic Thumbnail Carousel for 116 presets
+            LazyRow(
+                state = listState,
+                modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                displayedPresets.forEach { preset ->
+                items(
+                    items = displayedPresets,
+                    key = { it.name }
+                ) { preset ->
                     val selected = activeFilter == preset
-                    val colors = filterSwatchGradient(preset)
                     val interaction = remember(preset) { MutableInteractionSource() }
                     val swatchScale by animateFloatAsState(
-                        targetValue = if (selected && animEnabled) 1.07f else 1f,
+                        targetValue = if (selected && animEnabled) 1.05f else 1f,
                         animationSpec = if (animEnabled) HungCamMotion.bouncySpringFloat else tween(0),
                         label = "swatchScale_${preset.name}"
                     )
@@ -187,7 +296,7 @@ fun CameraFilterBar(
 
                     Column(
                         modifier = Modifier
-                            .width(62.dp)
+                            .width(68.dp)
                             .springPressScale(interaction, pressedScale = 0.90f, extraScale = swatchScale)
                             .clip(RoundedCornerShape(14.dp))
                             .background(cardBg)
@@ -203,29 +312,13 @@ fun CameraFilterBar(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(5.dp)
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(40.dp)
-                                .clip(CircleShape)
-                                .background(Brush.linearGradient(colors))
-                                .border(
-                                    width = if (selected) 2.2.dp else 1.dp,
-                                    color = if (selected) accent else PureWhite.copy(alpha = 0.25f),
-                                    shape = CircleShape
-                                ),
-                            contentAlignment = Alignment.TopEnd
-                        ) {
-                            if (preset.isLeica) {
-                                Box(
-                                    modifier = Modifier
-                                        .padding(3.dp)
-                                        .size(9.dp)
-                                        .clip(CircleShape)
-                                        .background(CrimsonShutter)
-                                        .border(1.dp, PureWhite, CircleShape)
-                                )
-                            }
-                        }
+                        FilterPreviewThumb(
+                            preset = preset,
+                            selected = selected,
+                            accent = accent,
+                            size = 52.dp,
+                            cornerRadius = 11.dp
+                        )
                         Text(
                             text = preset.label,
                             style = MonoTelemetrySmall.copy(
@@ -286,13 +379,12 @@ fun CameraFilterBar(
 }
 
 @Composable
-private fun FilterGroupChip(
+fun FilterGroupChip(
     label: String,
     selected: Boolean,
     isLeicaDot: Boolean,
     onClick: () -> Unit
 ) {
-    val accent = LocalAccentColor.current
     val interaction = remember(label) { MutableInteractionSource() }
     Row(
         modifier = Modifier
@@ -309,7 +401,7 @@ private fun FilterGroupChip(
                 modifier = Modifier
                     .size(6.dp)
                     .clip(CircleShape)
-                    .background(CrimsonShutter)
+                    .background(CrimsonLeica)
             )
         }
         Text(
@@ -318,26 +410,10 @@ private fun FilterGroupChip(
                 fontSize = 11.sp,
                 fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
             ),
-            color = if (selected) PureBlack else PureWhite.copy(alpha = 0.85f)
+            color = if (selected) PureBlack else PureWhite.copy(alpha = 0.85f),
+            softWrap = false
         )
     }
 }
 
-fun filterSwatchGradient(preset: PhotoFilterPreset): List<Color> = when (preset) {
-    PhotoFilterPreset.NATURAL -> listOf(Color(0xFFECEFF4), Color(0xFF9BA3B0))
-    PhotoFilterPreset.LEICA_VIBRANT -> listOf(Color(0xFFFF4B3E), Color(0xFFFFB800), Color(0xFF1F7AE0))
-    PhotoFilterPreset.LEICA_AUTHENTIC -> listOf(Color(0xFFB57C50), Color(0xFF3E444E), Color(0xFF1A1B20))
-    PhotoFilterPreset.LEICA_BW_NAT -> listOf(Color(0xFFE0E2E5), Color(0xFF636870), Color(0xFF23262A))
-    PhotoFilterPreset.LEICA_BW_HC -> listOf(Color(0xFFFFFFFF), Color(0xFF202020), Color(0xFF000000))
-    PhotoFilterPreset.LEICA_SEPIA -> listOf(Color(0xFFE0C097), Color(0xFF8C6239), Color(0xFF3E2714))
-    PhotoFilterPreset.LEICA_BLUE -> listOf(Color(0xFF7FD8FF), Color(0xFF1D4E89), Color(0xFF0E1B33))
-    PhotoFilterPreset.PORTRA -> listOf(Color(0xFFFFD5B8), Color(0xFFE29D7D), Color(0xFF7CA7BA))
-    PhotoFilterPreset.FUJI_PRO -> listOf(Color(0xFF7ED6DF), Color(0xFF22A6B3), Color(0xFF2B4C59))
-    PhotoFilterPreset.VIVID -> listOf(Color(0xFFFF5E57), Color(0xFFFFB800))
-    PhotoFilterPreset.WARM -> listOf(Color(0xFFFFCC70), Color(0xFFC850C0))
-    PhotoFilterPreset.COOL -> listOf(Color(0xFF4BCFFA), Color(0xFF3B3B98))
-    PhotoFilterPreset.FILM -> listOf(Color(0xFF55E6C1), Color(0xFF2C3A47))
-    PhotoFilterPreset.VINTAGE -> listOf(Color(0xFFD1A36C), Color(0xFF6D4C3D))
-    PhotoFilterPreset.CINEMATIC -> listOf(Color(0xFF0FB9B1), Color(0xFFFF7F50))
-    PhotoFilterPreset.BW -> listOf(Color(0xFFBDC3C7), Color(0xFF2C3E50))
-}
+fun filterSwatchGradient(preset: PhotoFilterPreset): List<Color> = preset.swatchColors

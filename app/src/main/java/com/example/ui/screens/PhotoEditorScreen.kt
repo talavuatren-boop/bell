@@ -88,6 +88,7 @@ import com.example.ui.theme.CrimsonShutter
 import com.example.ui.theme.ElevatedObsidian
 import com.example.ui.theme.HairlineBorder
 import com.example.ui.theme.LocalAccentColor
+import com.example.ui.theme.LocalOnAccentColor
 import com.example.ui.theme.MonoTelemetrySmall
 import com.example.ui.theme.MutedSlate
 import com.example.ui.theme.PureBlack
@@ -147,6 +148,7 @@ fun PhotoEditorScreen(
     BackHandler(onBack = onBack)
 
     val accent = LocalAccentColor.current
+    val onAccent = LocalOnAccentColor.current
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
 
@@ -254,11 +256,11 @@ fun PhotoEditorScreen(
                     }
                 },
                 enabled = !isSaving && previewBitmap != null,
-                colors = ButtonDefaults.buttonColors(containerColor = accent, contentColor = PureBlack),
+                colors = ButtonDefaults.buttonColors(containerColor = accent, contentColor = onAccent),
                 modifier = Modifier.testTag("photo_editor_save")
             ) {
                 if (isSaving) {
-                    CircularProgressIndicator(modifier = Modifier.size(16.dp), color = PureBlack, strokeWidth = 2.dp)
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), color = onAccent, strokeWidth = 2.dp)
                 } else {
                     Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.size(4.dp))
@@ -376,7 +378,7 @@ fun PhotoEditorScreen(
                                         modifier = Modifier
                                             .clip(RoundedCornerShape(8.dp))
                                             .background(Color(0xC80E1016))
-                                            .border(1.2.dp, Color(0xFFFFB800), RoundedCornerShape(8.dp))
+                                            .border(1.2.dp, accent, RoundedCornerShape(8.dp))
                                             .padding(horizontal = 10.dp, vertical = 5.dp)
                                     )
                                 } else {
@@ -479,7 +481,7 @@ fun PhotoEditorScreen(
                     Text(
                         text = sec.label,
                         style = MaterialTheme.typography.labelLarge,
-                        color = if (selected) PureBlack else MutedSlate,
+                        color = if (selected) onAccent else MutedSlate,
                         modifier = Modifier
                             .clip(RoundedCornerShape(10.dp))
                             .background(if (selected) accent else Color.Transparent)
@@ -503,7 +505,7 @@ fun PhotoEditorScreen(
                             Text(
                                 text = p.label,
                                 style = MonoTelemetrySmall,
-                                color = if (selected) PureBlack else PureWhite,
+                                color = if (selected) onAccent else PureWhite,
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(10.dp))
                                     .background(if (selected) accent else ElevatedObsidian)
@@ -556,18 +558,37 @@ fun PhotoEditorScreen(
                     }
                 }
                 PhotoEditorSection.FILTERS -> {
+                    var editorShelfTab by remember { mutableStateOf(com.example.ui.components.FilterShelfTab.ALL) }
+                    val editorFilters = remember(editorShelfTab) { editorShelfTab.filterPresets() }
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            com.example.ui.components.FilterShelfTab.entries.forEach { tab ->
+                                com.example.ui.components.FilterGroupChip(
+                                    label = "${tab.label} (${if (tab == com.example.ui.components.FilterShelfTab.ALL) PhotoFilterPreset.entries.size else tab.filterPresets().size - 1})",
+                                    selected = editorShelfTab == tab,
+                                    isLeicaDot = tab.isLeicaDot,
+                                    onClick = { editorShelfTab = tab }
+                                )
+                            }
+                        }
+                        androidx.compose.foundation.lazy.LazyRow(
+                            modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            PhotoFilterPreset.entries.forEach { preset ->
+                            items(
+                                count = editorFilters.size,
+                                key = { editorFilters[it].name }
+                            ) { idx ->
+                                val preset = editorFilters[idx]
                                 val selected = currentAdj.filter == preset
-                                val gradColors = com.example.ui.components.filterSwatchGradient(preset)
                                 Column(
                                     modifier = Modifier
+                                        .width(66.dp)
                                         .clip(RoundedCornerShape(12.dp))
                                         .background(if (selected) accent.copy(alpha = 0.2f) else ElevatedObsidian)
                                         .border(
@@ -576,32 +597,24 @@ fun PhotoEditorScreen(
                                             RoundedCornerShape(12.dp)
                                         )
                                         .clickable { pushAdjustment(currentAdj.copy(filter = preset)) }
-                                        .padding(horizontal = 10.dp, vertical = 8.dp)
+                                        .padding(horizontal = 6.dp, vertical = 6.dp)
                                         .testTag("photo_filter_${preset.name.lowercase()}"),
                                     horizontalAlignment = Alignment.CenterHorizontally,
                                     verticalArrangement = Arrangement.spacedBy(4.dp)
                                 ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(28.dp)
-                                            .clip(androidx.compose.foundation.shape.CircleShape)
-                                            .background(androidx.compose.ui.graphics.Brush.linearGradient(gradColors)),
-                                        contentAlignment = Alignment.TopEnd
-                                    ) {
-                                        if (preset.isLeica) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .padding(2.dp)
-                                                    .size(7.dp)
-                                                    .clip(androidx.compose.foundation.shape.CircleShape)
-                                                    .background(com.example.ui.theme.CrimsonShutter)
-                                            )
-                                        }
-                                    }
+                                    com.example.ui.components.FilterPreviewThumb(
+                                        preset = preset,
+                                        selected = selected,
+                                        accent = accent,
+                                        size = 46.dp,
+                                        cornerRadius = 10.dp
+                                    )
                                     Text(
                                         preset.label,
                                         style = MonoTelemetrySmall.copy(fontSize = 10.sp),
-                                        color = if (selected) accent else PureWhite
+                                        color = if (selected) accent else PureWhite,
+                                        maxLines = 1,
+                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                                     )
                                 }
                             }
@@ -659,7 +672,7 @@ fun PhotoEditorScreen(
                             Text(
                                 text = preset.label,
                                 style = MonoTelemetrySmall,
-                                color = if (selected) PureBlack else PureWhite,
+                                color = if (selected) onAccent else PureWhite,
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(10.dp))
                                     .background(if (selected) accent else ElevatedObsidian)

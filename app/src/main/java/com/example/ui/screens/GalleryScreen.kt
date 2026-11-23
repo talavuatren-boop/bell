@@ -27,8 +27,9 @@ import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.DeleteOutline
@@ -43,7 +44,6 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -60,6 +60,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -68,13 +69,16 @@ import com.example.data.MediaAssetEntity
 import com.example.model.GalleryCategory
 import com.example.model.MediaItemType
 import com.example.ui.MainViewModel
+import com.example.ui.components.HungCamMotion
 import com.example.ui.components.SpringIconButton
 import com.example.ui.components.springPressScale
 import com.example.ui.theme.CardSlate
+import com.example.ui.theme.CrimsonLeica
 import com.example.ui.theme.CrimsonShutter
 import com.example.ui.theme.ElevatedObsidian
 import com.example.ui.theme.HairlineBorder
 import com.example.ui.theme.LocalAccentColor
+import com.example.ui.theme.LocalOnAccentColor
 import com.example.ui.theme.MonoTelemetrySmall
 import com.example.ui.theme.MutedSlate
 import com.example.ui.theme.PureBlack
@@ -91,6 +95,7 @@ fun GalleryScreen(
     modifier: Modifier = Modifier
 ) {
     val accent = LocalAccentColor.current
+    val onAccent = LocalOnAccentColor.current
     val scope = rememberCoroutineScope()
     val category by viewModel.galleryCategory.collectAsStateWithLifecycle()
     val activeAssets by viewModel.activeAssets.collectAsStateWithLifecycle()
@@ -122,7 +127,7 @@ fun GalleryScreen(
             .background(PureBlack)
             .statusBarsPadding()
     ) {
-        // Header
+        // Clean Header without redundant Back button (bottom dock provides Camera directly)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -130,35 +135,17 @@ fun GalleryScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                SpringIconButton(
-                    onClick = onGoToCamera,
-                    modifier = Modifier
-                        .background(ElevatedObsidian, CircleShape)
-                        .border(1.dp, HairlineBorder, CircleShape)
-                        .testTag("gallery_back_camera_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Quay lại Camera",
-                        tint = PureWhite
-                    )
-                }
-                Column {
-                    Text(
-                        text = "Thư viện",
-                        style = MaterialTheme.typography.headlineMedium,
-                        color = PureWhite
-                    )
-                    Text(
-                        text = "${displayed.size} mục • ${category.label}",
-                        style = MonoTelemetrySmall,
-                        color = MutedSlate
-                    )
-                }
+            Column {
+                Text(
+                    text = "Thư viện",
+                    style = MaterialTheme.typography.headlineMedium,
+                    color = PureWhite
+                )
+                Text(
+                    text = "${displayed.size} mục • ${category.label}",
+                    style = MonoTelemetrySmall,
+                    color = MutedSlate
+                )
             }
             Row(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -167,14 +154,16 @@ fun GalleryScreen(
                 SpringIconButton(
                     onClick = onOpenVideoMerge,
                     modifier = Modifier
+                        .size(40.dp)
                         .background(ElevatedObsidian, CircleShape)
                         .border(1.dp, HairlineBorder, CircleShape)
                         .testTag("gallery_merge_videos_button")
                 ) {
                     Icon(
                         imageVector = Icons.Default.MergeType,
-                        contentDescription = "Merge & Combine Videos",
-                        tint = PureWhite
+                        contentDescription = "Ghép Video",
+                        tint = PureWhite,
+                        modifier = Modifier.size(20.dp)
                     )
                 }
                 SpringIconButton(
@@ -184,19 +173,22 @@ fun GalleryScreen(
                         )
                     },
                     modifier = Modifier
+                        .size(40.dp)
                         .background(ElevatedObsidian, CircleShape)
                         .border(1.dp, HairlineBorder, CircleShape)
                         .testTag("gallery_import_button")
                 ) {
                     Icon(
                         imageVector = Icons.Default.AddPhotoAlternate,
-                        contentDescription = "Import from Photo Picker",
-                        tint = accent
+                        contentDescription = "Nhập từ máy",
+                        tint = accent,
+                        modifier = Modifier.size(20.dp)
                     )
                 }
                 SpringIconButton(
                     onClick = onOpenSettings,
                     modifier = Modifier
+                        .size(40.dp)
                         .background(ElevatedObsidian, CircleShape)
                         .border(1.dp, HairlineBorder, CircleShape)
                         .testTag("gallery_settings_button")
@@ -204,7 +196,8 @@ fun GalleryScreen(
                     Icon(
                         imageVector = Icons.Default.Settings,
                         contentDescription = "Cài đặt",
-                        tint = PureWhite
+                        tint = PureWhite,
+                        modifier = Modifier.size(20.dp)
                     )
                 }
             }
@@ -221,12 +214,22 @@ fun GalleryScreen(
             GalleryCategory.entries.forEach { cat ->
                 val selected = category == cat
                 val pillInteraction = remember(cat) { MutableInteractionSource() }
+                val bgColor by animateColorAsState(
+                    targetValue = if (selected) accent else ElevatedObsidian,
+                    animationSpec = tween(180),
+                    label = "galCatBg"
+                )
+                val borderColor by animateColorAsState(
+                    targetValue = if (selected) accent else HairlineBorder,
+                    animationSpec = tween(180),
+                    label = "galCatBorder"
+                )
                 Box(
                     modifier = Modifier
                         .springPressScale(pillInteraction, pressedScale = 0.91f)
                         .clip(RoundedCornerShape(16.dp))
-                        .background(if (selected) accent else ElevatedObsidian)
-                        .border(1.dp, if (selected) accent else HairlineBorder, RoundedCornerShape(16.dp))
+                        .background(bgColor)
+                        .border(1.dp, borderColor, RoundedCornerShape(16.dp))
                         .clickable(interactionSource = pillInteraction, indication = null) {
                             viewModel.selectGalleryCategory(cat)
                         }
@@ -235,8 +238,11 @@ fun GalleryScreen(
                 ) {
                     Text(
                         text = cat.label,
-                        style = MaterialTheme.typography.labelLarge.copy(fontSize = 12.sp),
-                        color = if (selected) PureBlack else PureWhite
+                        style = MaterialTheme.typography.labelLarge.copy(
+                            fontSize = 12.sp,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
+                        ),
+                        color = if (selected) onAccent else PureWhite
                     )
                 }
             }
@@ -252,38 +258,49 @@ fun GalleryScreen(
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Icon(
-                    imageVector = Icons.Default.PhotoCamera,
-                    contentDescription = null,
-                    tint = MutedSlate,
-                    modifier = Modifier.size(48.dp)
-                )
-                Spacer(modifier = Modifier.height(12.dp))
+                Box(
+                    modifier = Modifier
+                        .size(72.dp)
+                        .clip(CircleShape)
+                        .background(accent.copy(alpha = 0.14f))
+                        .border(1.dp, accent.copy(alpha = 0.35f), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PhotoCamera,
+                        contentDescription = null,
+                        tint = accent,
+                        modifier = Modifier.size(32.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.height(14.dp))
                 Text(
-                    text = if (category == GalleryCategory.RECENTLY_DELETED) "Trash is empty" else "No captures in ${category.label}",
+                    text = if (category == GalleryCategory.RECENTLY_DELETED) "Thùng rác đang trống" else "Chưa có mục nào trong ${category.label}",
                     style = MaterialTheme.typography.titleMedium,
-                    color = PureWhite
+                    color = PureWhite,
+                    textAlign = TextAlign.Center
                 )
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = "Capture photos, Live Photos, or videos with HUNG CAM, or import media using the Photo Picker.",
+                    text = "Chụp ảnh, Live Photo hoặc quay video bằng HUNG CAM, hoặc nhập ảnh sẵn có từ thiết bị.",
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MutedSlate
+                    color = MutedSlate,
+                    textAlign = TextAlign.Center
                 )
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(18.dp))
                 if (category != GalleryCategory.RECENTLY_DELETED) {
                     Button(
                         onClick = onGoToCamera,
-                        colors = ButtonDefaults.buttonColors(containerColor = accent, contentColor = PureBlack)
+                        colors = ButtonDefaults.buttonColors(containerColor = accent, contentColor = onAccent)
                     ) {
-                        Text("Open Camera")
+                        Text("Mở Camera", fontWeight = FontWeight.SemiBold)
                     }
                 }
             }
         } else {
             LazyVerticalGrid(
-                columns = GridCells.Adaptive(minSize = 112.dp),
-                contentPadding = PaddingValues(12.dp),
+                columns = GridCells.Adaptive(minSize = 110.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
                 modifier = Modifier.fillMaxSize()
@@ -295,7 +312,11 @@ fun GalleryScreen(
                         onClick = { onOpenViewer(displayed, index) },
                         onRestore = { scope.launch { viewModel.mediaRepo.restoreFromTrash(item) } },
                         onHardDelete = { pendingHardDeleteAsset = item },
-                        modifier = Modifier.animateItem()
+                        modifier = Modifier.animateItem(
+                            fadeInSpec = tween(220, easing = HungCamMotion.EmphasizedDecelerate),
+                            fadeOutSpec = tween(180, easing = HungCamMotion.EmphasizedDecelerate),
+                            placementSpec = HungCamMotion.drawerSpringOffset
+                        )
                     )
                 }
             }

@@ -2,9 +2,8 @@ package com.example.model
 
 enum class MainNavDestination(val route: String, val label: String) {
     CAMERA("camera", "Camera"),
-    GALLERY("gallery", "Gallery"),
-    AI_STUDIO("ai_studio", "AI Studio"),
-    SETTINGS("settings", "Settings")
+    GALLERY("gallery", "Thư viện"),
+    AI_STUDIO("ai_studio", "AI Studio")
 }
 
 enum class CameraMode(val label: String) {
@@ -123,49 +122,20 @@ enum class TimelapseSpeed(val multiplier: Int, val label: String) {
 }
 
 enum class AiProcessingMode(val label: String, val subtitle: String) {
-    FAST("FAST", "Basic enhancement, low power & latency"),
-    BALANCED("BALANCED", "Improved denoise, sharpness & stabilization"),
-    QUALITY("QUALITY", "Multi-pass temporal denoise & high-bitrate export")
+    FAST("NHANH", "Xử lý tức thì, tiết kiệm pin"),
+    BALANCED("CÂN BẰNG", "Khử nhiễu & tăng nét tối ưu"),
+    QUALITY("SIÊU NÉT", "Đa lớp chi tiết & bitrate cao")
 }
 
 enum class AiToolType(val label: String, val isVideoOnly: Boolean, val isPhotoCompatible: Boolean) {
-    ENHANCE_ALL("Enhance All", false, true),
-    DENOISE("AI Denoise", true, true),
-    SHARPEN("AI Sharpen", true, true),
-    UPSCALE("AI Super-Res 2x", true, true),
-    COLOR_CORRECTION("AI Color", true, true),
-    VIDEO_STABILIZE("AI Stabilization", true, false),
-    FRAME_ENHANCE("AI Frame Enhance", true, false),
-    FRAME_INTERPOLATE("Frame Interp 60fps", true, false)
-}
-
-enum class FilterCategory(val label: String) {
-    BASE("Gốc"),
-    LEICA("Leica"),
-    FILM("Máy ảnh")
-}
-
-enum class PhotoFilterPreset(
-    val label: String,
-    val category: FilterCategory = FilterCategory.FILM,
-    val isLeica: Boolean = false
-) {
-    NATURAL("Gốc", FilterCategory.BASE, false),
-    LEICA_VIBRANT("Leica Vivid", FilterCategory.LEICA, true),
-    LEICA_AUTHENTIC("Leica Nat", FilterCategory.LEICA, true),
-    LEICA_BW_NAT("Leica BW", FilterCategory.LEICA, true),
-    LEICA_BW_HC("Leica HC", FilterCategory.LEICA, true),
-    LEICA_SEPIA("Leica Sepia", FilterCategory.LEICA, true),
-    LEICA_BLUE("Leica Blue", FilterCategory.LEICA, true),
-    PORTRA("Portra 400", FilterCategory.FILM, false),
-    FUJI_PRO("Fuji Pro", FilterCategory.FILM, false),
-    VIVID("Rực rỡ", FilterCategory.FILM, false),
-    WARM("Ấm áp", FilterCategory.FILM, false),
-    COOL("Mát lạnh", FilterCategory.FILM, false),
-    FILM("Phim 35mm", FilterCategory.FILM, false),
-    VINTAGE("Cổ điển", FilterCategory.FILM, false),
-    CINEMATIC("Điện ảnh", FilterCategory.FILM, false),
-    BW("Đen trắng", FilterCategory.FILM, false)
+    ENHANCE_ALL("Tối ưu toàn diện", false, true),
+    DENOISE("Khử nhiễu AI", true, true),
+    SHARPEN("Tăng nét AI", true, true),
+    UPSCALE("Siêu phân giải 2x", true, true),
+    COLOR_CORRECTION("Màu sắc AI", true, true),
+    VIDEO_STABILIZE("Chống rung AI", true, false),
+    FRAME_ENHANCE("Tăng nét khung", true, false),
+    FRAME_INTERPOLATE("Nội suy 60fps", true, false)
 }
 
 enum class CropAspectPreset(val label: String, val ratio: Float?) {
@@ -177,19 +147,19 @@ enum class CropAspectPreset(val label: String, val ratio: Float?) {
 }
 
 enum class AccentColorPreset(val label: String) {
-    LEICA_AMBER("Amber Gold"),
-    ELECTRIC_CYAN("Cyan"),
-    CRIMSON_PRO("Crimson"),
-    EMERALD("Emerald")
+    CRIMSON_PRO("Đỏ Leica"),
+    PURE_WHITE("Trắng"),
+    ELECTRIC_CYAN("Xanh Cyan"),
+    EMERALD("Ngọc lục")
 }
 
 enum class GalleryCategory(val label: String) {
-    ALL("All"),
-    PHOTOS("Photos"),
-    VIDEOS("Videos"),
+    ALL("Tất cả"),
+    PHOTOS("Ảnh"),
+    VIDEOS("Video"),
     LIVE_PHOTOS("Live"),
-    FAVORITES("Favorites"),
-    RECENTLY_DELETED("Trash")
+    FAVORITES("Yêu thích"),
+    RECENTLY_DELETED("Thùng rác")
 }
 
 enum class MediaItemType {

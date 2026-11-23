@@ -81,6 +81,7 @@ import com.example.ui.theme.ElevatedObsidian
 import com.example.ui.theme.HairlineBorder
 import com.example.ui.theme.LevelGreen
 import com.example.ui.theme.LocalAccentColor
+import com.example.ui.theme.LocalOnAccentColor
 import com.example.ui.theme.MonoTelemetryLarge
 import com.example.ui.theme.MonoTelemetrySmall
 import com.example.ui.theme.MutedSlate
@@ -109,6 +110,7 @@ fun VideoMergeScreen(
     }
 
     val accent = LocalAccentColor.current
+    val onAccent = LocalOnAccentColor.current
     val assets by viewModel.activeAssets.collectAsStateWithLifecycle()
     val mergeProgress by viewModel.mergeProgress.collectAsStateWithLifecycle()
     val galleryVideos = remember(assets) {
@@ -290,7 +292,7 @@ fun VideoMergeScreen(
                             Icon(
                                 imageVector = icon,
                                 contentDescription = null,
-                                tint = if (selected) PureBlack else accent
+                                tint = if (selected) onAccent else accent
                             )
                         }
                         Column(modifier = Modifier.weight(1f)) {
@@ -472,7 +474,7 @@ fun VideoMergeScreen(
                                 .padding(vertical = 8.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text(res.label, style = MonoTelemetrySmall, color = if (selected) PureBlack else PureWhite)
+                            Text(res.label, style = MonoTelemetrySmall, color = if (selected) onAccent else PureWhite)
                         }
                     }
                 }
@@ -491,7 +493,7 @@ fun VideoMergeScreen(
                                 .padding(vertical = 8.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text("${fps} FPS", style = MonoTelemetrySmall, color = if (selected) PureBlack else PureWhite)
+                            Text("${fps} FPS", style = MonoTelemetrySmall, color = if (selected) onAccent else PureWhite)
                         }
                     }
                 }
@@ -507,7 +509,7 @@ fun VideoMergeScreen(
                     Switch(
                         checked = includeAudio,
                         onCheckedChange = { if (!mergeProgress.isRunning) includeAudio = it },
-                        colors = SwitchDefaults.colors(checkedThumbColor = PureBlack, checkedTrackColor = accent)
+                        colors = SwitchDefaults.colors(checkedThumbColor = onAccent, checkedTrackColor = accent)
                     )
                 }
             }
@@ -597,7 +599,7 @@ fun VideoMergeScreen(
                     )
                 },
                 enabled = selectedClips.size >= 2 && !mergeProgress.isRunning,
-                colors = ButtonDefaults.buttonColors(containerColor = accent, contentColor = PureBlack),
+                colors = ButtonDefaults.buttonColors(containerColor = accent, contentColor = onAccent),
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(52.dp)

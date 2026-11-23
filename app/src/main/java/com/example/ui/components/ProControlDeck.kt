@@ -37,9 +37,9 @@ import com.example.ui.theme.CardSlate
 import com.example.ui.theme.ElevatedObsidian
 import com.example.ui.theme.HairlineBorder
 import com.example.ui.theme.LocalAccentColor
+import com.example.ui.theme.LocalOnAccentColor
 import com.example.ui.theme.MonoTelemetrySmall
 import com.example.ui.theme.MutedSlate
-import com.example.ui.theme.PureBlack
 import com.example.ui.theme.PureWhite
 import kotlin.math.roundToInt
 
@@ -282,6 +282,7 @@ private fun ProToggleChip(
     tag: String
 ) {
     val accent = LocalAccentColor.current
+    val onAccent = LocalOnAccentColor.current
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(8.dp))
@@ -295,7 +296,7 @@ private fun ProToggleChip(
         Text(
             text = label,
             style = MonoTelemetrySmall.copy(fontSize = 10.sp),
-            color = if (active) PureBlack else PureWhite
+            color = if (active) onAccent else PureWhite
         )
     }
 }

@@ -13,11 +13,10 @@ val SoftWhite = Color(0xFFE6E8EE)
 val MutedSlate = Color(0xFF949AA8)
 val DimSlate = Color(0xFF606675)
 
-val LeicaAmber = Color(0xFFFFB800)
+val CrimsonLeica = Color(0xFFE61E2A)
 val ElectricCyan = Color(0xFF00E5FF)
 val CrimsonShutter = Color(0xFFFF3B30)
 val EmeraldOptical = Color(0xFF10B981)
 
-val WarningAmber = Color(0xFFFF9500)
 val ErrorCrimson = Color(0xFFFF453A)
 val LevelGreen = Color(0xFF30D158)

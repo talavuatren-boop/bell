@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -44,6 +45,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -62,14 +64,15 @@ import com.example.model.VideoCodecOption
 import com.example.ui.MainViewModel
 import com.example.ui.theme.CardSlate
 import com.example.ui.theme.ElevatedObsidian
+import com.example.ui.theme.ErrorCrimson
 import com.example.ui.theme.HairlineBorder
 import com.example.ui.theme.LevelGreen
 import com.example.ui.theme.LocalAccentColor
+import com.example.ui.theme.LocalOnAccentColor
 import com.example.ui.theme.MonoTelemetrySmall
 import com.example.ui.theme.MutedSlate
 import com.example.ui.theme.PureBlack
 import com.example.ui.theme.PureWhite
-import com.example.ui.theme.WarningAmber
 
 @Composable
 fun SettingsScreen(
@@ -99,6 +102,7 @@ fun SettingsScreen(
             .fillMaxSize()
             .background(PureBlack)
             .statusBarsPadding()
+            .navigationBarsPadding()
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
@@ -119,7 +123,7 @@ fun SettingsScreen(
             ) {
                 Icon(
                     imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = "Quay lại Camera",
+                    contentDescription = "Quay lại",
                     tint = PureWhite
                 )
             }
@@ -132,45 +136,49 @@ fun SettingsScreen(
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(16.dp))
                 .background(CardSlate)
-                .border(1.dp, accent.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
+                .border(1.dp, accent.copy(alpha = 0.45f), RoundedCornerShape(16.dp))
                 .clickable(onClick = onOpenCapabilityReport)
                 .padding(16.dp)
                 .testTag("settings_capability_report_button"),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(
+                modifier = Modifier.weight(1f),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
                 Icon(Icons.Default.Memory, contentDescription = null, tint = accent, modifier = Modifier.size(26.dp))
                 Column {
-                    Text("Camera Capability Report", style = MaterialTheme.typography.titleMedium, color = PureWhite)
+                    Text("Thông số phần cứng Camera", style = MaterialTheme.typography.titleMedium, color = PureWhite)
                     Text(
-                        text = capabilities?.let { "${it.manufacturer} ${it.deviceModel} • ${it.lenses.size} lenses probed" }
-                            ?: "Probing hardware...",
+                        text = capabilities?.let { "${it.manufacturer} ${it.deviceModel} • ${it.lenses.size} ống kính" }
+                            ?: "Đang kiểm tra cảm biến...",
                         style = MonoTelemetrySmall,
                         color = MutedSlate
                     )
                 }
             }
-            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "View Report", tint = accent)
+            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "Xem chi tiết", tint = accent)
         }
 
         // 1. Camera Settings
-        SettingsSectionCard("Camera Engine") {
+        SettingsSectionCard("Động cơ Camera") {
             SettingsToggleRow(
-                title = "Default to Rear Camera",
-                subtitle = "Launch on main rear sensor instead of front",
+                title = "Ưu tiên Camera sau",
+                subtitle = "Mở cảm biến chính phía sau khi khởi động ứng dụng",
                 checked = settings.defaultLensFacingBack,
                 onCheckedChange = { v -> viewModel.updateSettings { it.copy(defaultLensFacingBack = v) } }
             )
             SettingsChipGroup(
-                label = "Default Mode",
+                label = "Chế độ mặc định",
                 items = listOf(CameraMode.PHOTO, CameraMode.VIDEO, CameraMode.PORTRAIT, CameraMode.PRO),
                 selected = settings.defaultCameraMode,
-                itemLabel = { it.label },
+                itemLabel = { it.flagshipLabel() },
                 onSelect = { m -> viewModel.updateSettings { it.copy(defaultCameraMode = m) } }
             )
             SettingsChipGroup(
-                label = "Photo Resolution",
+                label = "Độ phân giải ảnh",
                 items = PhotoResolutionTier.entries,
                 selected = settings.photoResolutionTier,
                 itemLabel = { it.label },
@@ -181,14 +189,14 @@ fun SettingsScreen(
                 if (activeLens?.supportsHeic == true) add(PhotoFormat.HEIC)
             }
             SettingsChipGroup(
-                label = "Photo Format",
+                label = "Định dạng ảnh",
                 items = availableFormats,
                 selected = if (availableFormats.contains(settings.photoFormat)) settings.photoFormat else PhotoFormat.JPEG,
                 itemLabel = { it.label },
                 onSelect = { fmt -> viewModel.updateSettings { it.copy(photoFormat = fmt) } }
             )
             SettingsChipGroup(
-                label = "Video Bitrate",
+                label = "Bitrate Video",
                 items = VideoBitrateTier.entries,
                 selected = settings.videoBitrateTier,
                 itemLabel = { it.label },
@@ -199,42 +207,42 @@ fun SettingsScreen(
                 if (capabilities?.supportsHevcEncode == true) add(VideoCodecOption.HEVC)
             }
             SettingsChipGroup(
-                label = "Video Codec",
+                label = "Chuẩn nén Video",
                 items = codecs,
                 selected = if (codecs.contains(settings.videoCodec)) settings.videoCodec else VideoCodecOption.H264,
                 itemLabel = { it.label },
                 onSelect = { c -> viewModel.updateSettings { it.copy(videoCodec = c) } }
             )
             SettingsChipGroup(
-                label = "Stabilization",
+                label = "Chống rung",
                 items = StabilizationMode.entries,
                 selected = settings.stabilizationMode,
                 itemLabel = { it.label },
                 onSelect = { st -> viewModel.updateSettings { it.copy(stabilizationMode = st) } }
             )
             SettingsChipGroup(
-                label = "Aspect Ratio",
+                label = "Tỷ lệ khung hình",
                 items = AspectRatioMode.entries,
                 selected = settings.aspectRatio,
                 itemLabel = { it.label },
                 onSelect = { ar -> viewModel.updateSettings { it.copy(aspectRatio = ar) } }
             )
             SettingsChipGroup(
-                label = "Grid Overlay",
+                label = "Lưới bố cục",
                 items = GridType.entries,
                 selected = settings.gridType,
                 itemLabel = { it.label },
                 onSelect = { g -> viewModel.updateSettings { it.copy(gridType = g) } }
             )
             SettingsToggleRow(
-                title = "Electronic Horizon Level",
-                subtitle = "Gyro/gravity roll indicator in viewfinder",
+                title = "Thước thủy cân bằng",
+                subtitle = "Hiển thị đường căn ngang theo con quay hồi chuyển",
                 checked = settings.electronicLevelEnabled,
                 onCheckedChange = { v -> viewModel.updateSettings { it.copy(electronicLevelEnabled = v) } }
             )
             SettingsToggleRow(
-                title = "Volume Button Shutter",
-                subtitle = "Press Volume Up/Down to trigger shutter",
+                title = "Chụp bằng nút Âm lượng",
+                subtitle = "Nhấn nút Tăng/Giảm âm lượng để bấm máy nhanh",
                 checked = settings.volumeShutterEnabled,
                 onCheckedChange = { v -> viewModel.updateSettings { it.copy(volumeShutterEnabled = v) } }
             )
@@ -253,101 +261,101 @@ fun SettingsScreen(
         }
 
         // 2. Live Photo Settings
-        SettingsSectionCard("Live Photo Engine") {
+        SettingsSectionCard("Động cơ Live Photo") {
             SettingsChipGroup(
-                label = "Default Duration",
+                label = "Thời lượng mặc định",
                 items = LivePhotoDuration.entries,
                 selected = settings.livePhotoDefaultDuration,
                 itemLabel = { it.label },
                 onSelect = { d -> viewModel.updateSettings { it.copy(livePhotoDefaultDuration = d) } }
             )
             SettingsToggleRow(
-                title = "Live Photo Audio",
-                subtitle = "Record synchronized AAC audio track around shutter",
+                title = "Thu âm Live Photo",
+                subtitle = "Ghi đồng bộ âm thanh AAC xung quanh thời điểm bấm máy",
                 checked = settings.livePhotoSoundEnabled,
                 onCheckedChange = { v -> viewModel.updateSettings { it.copy(livePhotoSoundEnabled = v) } }
             )
             SettingsToggleRow(
-                title = "High-Bitrate Ring Buffer",
-                subtitle = "16 Mbps vs 10 Mbps H.264 stream",
+                title = "Ring Buffer Bitrate cao",
+                subtitle = "Luồng H.264 16 Mbps sắc nét (so với tiêu chuẩn 10 Mbps)",
                 checked = settings.livePhotoHighBitrate,
                 onCheckedChange = { v -> viewModel.updateSettings { it.copy(livePhotoHighBitrate = v) } }
             )
             Text(
-                text = "Available Device Storage: ${telemetry.freeStorageMb} MB",
+                text = "Bộ nhớ khả dụng: ${telemetry.freeStorageMb} MB",
                 style = MonoTelemetrySmall,
                 color = MutedSlate
             )
         }
 
         // 3. AI Engine Settings
-        SettingsSectionCard("AI Processing Engine") {
+        SettingsSectionCard("Xử lý AI trên thiết bị") {
             SettingsChipGroup(
-                label = "Default Quality Mode",
+                label = "Chế độ chất lượng mặc định",
                 items = AiProcessingMode.entries,
                 selected = settings.aiDefaultMode,
                 itemLabel = { it.label },
                 onSelect = { m -> viewModel.updateSettings { it.copy(aiDefaultMode = m) } }
             )
             SettingsToggleRow(
-                title = "Local On-Device Processing Only",
-                subtitle = "Keep all media strictly on device; never upload",
+                title = "Chỉ xử lý cục bộ trên máy",
+                subtitle = "Giữ toàn bộ ảnh và video trên thiết bị, không tải lên mạng",
                 checked = settings.aiLocalProcessingOnly,
                 onCheckedChange = { v -> viewModel.updateSettings { it.copy(aiLocalProcessingOnly = v) } }
             )
             SettingsToggleRow(
-                title = "AI Stabilization Default",
-                subtitle = "Pre-enable gyro + motion stabilization in AI Studio",
+                title = "Chống rung AI mặc định",
+                subtitle = "Tự động bật chống rung gyro trong AI Studio",
                 checked = settings.aiAutoStabilize,
                 onCheckedChange = { v -> viewModel.updateSettings { it.copy(aiAutoStabilize = v) } }
             )
             SettingsToggleRow(
-                title = "AI Denoise & Sharpen Default",
-                subtitle = "Edge-preserving YCbCr denoise + halo-free sharpen",
+                title = "Khử nhiễu & tăng nét tự động",
+                subtitle = "Khử nhiễu YCbCr bảo toàn chi tiết biên không quầng sáng",
                 checked = settings.aiAutoDenoise,
                 onCheckedChange = { v -> viewModel.updateSettings { it.copy(aiAutoDenoise = v, aiAutoSharpen = v) } }
             )
         }
 
         // 4. Interface Settings
-        SettingsSectionCard("Interface & Polish") {
+        SettingsSectionCard("Giao diện & Chuyển động") {
             SettingsChipGroup(
-                label = "Accent Color",
+                label = "Màu chủ đạo",
                 items = AccentColorPreset.entries,
                 selected = settings.accentColorPreset,
                 itemLabel = { it.label },
                 onSelect = { a -> viewModel.updateSettings { it.copy(accentColorPreset = a) } }
             )
             SettingsToggleRow(
-                title = "OLED Deep Black Mode",
-                subtitle = "Obsidian dark camera interface",
+                title = "Nền đen OLED",
+                subtitle = "Giao diện tối sâu tương phản cao cho màn hình AMOLED",
                 checked = settings.darkModeEnabled,
                 onCheckedChange = { v -> viewModel.updateSettings { it.copy(darkModeEnabled = v) } }
             )
             SettingsToggleRow(
-                title = "Tactile Haptic Feedback",
-                subtitle = "Vibration pulses on shutter, dials, and Live playback",
+                title = "Rung phản hồi xúc giác",
+                subtitle = "Nhịp rung khi bấm màn trập, xoay vòng Pro & phát Live Photo",
                 checked = settings.hapticFeedbackEnabled,
                 onCheckedChange = { v -> viewModel.updateSettings { it.copy(hapticFeedbackEnabled = v) } }
             )
             SettingsToggleRow(
-                title = "UI Motion & Animations",
-                subtitle = "Smooth transitions and spring reticles",
+                title = "Hiệu ứng chuyển động 60fps",
+                subtitle = "Chuyển cảnh và con trỏ lấy nét lò xo mượt mà",
                 checked = settings.animationsEnabled,
                 onCheckedChange = { v -> viewModel.updateSettings { it.copy(animationsEnabled = v) } }
             )
         }
 
         // 5. Privacy & Permissions
-        SettingsSectionCard("Privacy & Permissions") {
-            PermissionRow("Camera Permission", camGranted) {
+        SettingsSectionCard("Quyền & Riêng tư") {
+            PermissionRow("Quyền Camera", camGranted) {
                 context.startActivity(
                     Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
                         data = Uri.fromParts("package", context.packageName, null)
                     }
                 )
             }
-            PermissionRow("Microphone Permission", micGranted) {
+            PermissionRow("Quyền Micro", micGranted) {
                 context.startActivity(
                     Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
                         data = Uri.fromParts("package", context.packageName, null)
@@ -355,13 +363,13 @@ fun SettingsScreen(
                 )
             }
             Text(
-                text = "Media Access: Zero-permission Android Photo Picker + App-owned MediaStore collection (Google Play compliant).",
+                text = "Truy cập thư viện: Sử dụng Android Photo Picker bảo mật không cần quyền bộ nhớ rộng (tuân thủ Google Play).",
                 style = MaterialTheme.typography.bodyMedium.copy(fontSize = 12.sp),
                 color = MutedSlate
             )
             SettingsToggleRow(
-                title = "Optional Location Metadata",
-                subtitle = "Attach coarse coordinates to photo EXIF",
+                title = "Lưu tọa độ vị trí vào EXIF",
+                subtitle = "Gắn thông tin địa điểm chụp vào ảnh",
                 checked = settings.locationMetadataEnabled,
                 onCheckedChange = { enable ->
                     if (enable) {
@@ -392,7 +400,11 @@ private fun SettingsSectionCard(title: String, content: @Composable ColumnScope.
             .padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
         content = {
-            Text(title, style = MaterialTheme.typography.titleMedium, color = LocalAccentColor.current)
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                color = LocalAccentColor.current
+            )
             content()
         }
     )
@@ -406,6 +418,7 @@ private fun SettingsToggleRow(
     onCheckedChange: (Boolean) -> Unit
 ) {
     val accent = LocalAccentColor.current
+    val onAccent = LocalOnAccentColor.current
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -418,7 +431,13 @@ private fun SettingsToggleRow(
         Switch(
             checked = checked,
             onCheckedChange = onCheckedChange,
-            colors = SwitchDefaults.colors(checkedThumbColor = PureBlack, checkedTrackColor = accent)
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = onAccent,
+                checkedTrackColor = accent,
+                uncheckedThumbColor = PureWhite.copy(alpha = 0.85f),
+                uncheckedTrackColor = ElevatedObsidian,
+                uncheckedBorderColor = HairlineBorder
+            )
         )
     }
 }
@@ -432,6 +451,7 @@ private fun <T> SettingsChipGroup(
     onSelect: (T) -> Unit
 ) {
     val accent = LocalAccentColor.current
+    val onAccent = LocalOnAccentColor.current
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(label, style = MaterialTheme.typography.bodyMedium, color = MutedSlate)
         Row(
@@ -448,7 +468,13 @@ private fun <T> SettingsChipGroup(
                         .clickable { onSelect(item) }
                         .padding(horizontal = 10.dp, vertical = 6.dp)
                 ) {
-                    Text(itemLabel(item), style = MonoTelemetrySmall, color = if (isSelected) PureBlack else PureWhite)
+                    Text(
+                        text = itemLabel(item),
+                        style = MonoTelemetrySmall.copy(
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                        ),
+                        color = if (isSelected) onAccent else PureWhite
+                    )
                 }
             }
         }
@@ -467,9 +493,9 @@ private fun PermissionRow(label: String, granted: Boolean, onOpenSettings: () ->
     ) {
         Text(label, style = MaterialTheme.typography.bodyMedium, color = PureWhite)
         Text(
-            text = if (granted) "GRANTED" else "TAP TO CONFIGURE",
-            style = MonoTelemetrySmall,
-            color = if (granted) LevelGreen else WarningAmber
+            text = if (granted) "ĐÃ CẤP" else "CHẠM ĐỂ CẤP",
+            style = MonoTelemetrySmall.copy(fontWeight = FontWeight.Bold),
+            color = if (granted) LevelGreen else ErrorCrimson
         )
     }
 }

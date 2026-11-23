@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -59,6 +60,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.example.data.MediaAssetEntity
 import com.example.model.VideoEditConfig
@@ -68,10 +70,12 @@ import com.example.ui.theme.CardSlate
 import com.example.ui.theme.ElevatedObsidian
 import com.example.ui.theme.HairlineBorder
 import com.example.ui.theme.LocalAccentColor
+import com.example.ui.theme.LocalOnAccentColor
 import com.example.ui.theme.MonoTelemetrySmall
 import com.example.ui.theme.MutedSlate
 import com.example.ui.theme.PureBlack
 import com.example.ui.theme.PureWhite
+import kotlinx.coroutines.launch
 
 @Composable
 fun VideoEditorScreen(
@@ -82,6 +86,7 @@ fun VideoEditorScreen(
     BackHandler(onBack = onBack)
 
     val accent = LocalAccentColor.current
+    val onAccent = LocalOnAccentColor.current
     val totalMs = asset.durationMs.coerceAtLeast(1000L)
 
     var config by remember {
@@ -150,7 +155,7 @@ fun VideoEditorScreen(
                     )
                 },
                 enabled = !isExporting,
-                colors = ButtonDefaults.buttonColors(containerColor = accent, contentColor = PureBlack),
+                colors = ButtonDefaults.buttonColors(containerColor = accent, contentColor = onAccent),
                 modifier = Modifier.testTag("video_editor_export")
             ) {
                 Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -270,7 +275,7 @@ fun VideoEditorScreen(
                     Text(
                         text = res.label,
                         style = MonoTelemetrySmall,
-                        color = if (selected) PureBlack else PureWhite,
+                        color = if (selected) onAccent else PureWhite,
                         modifier = Modifier
                             .clip(RoundedCornerShape(10.dp))
                             .background(if (selected) accent else CardSlate)
@@ -283,7 +288,7 @@ fun VideoEditorScreen(
                     Text(
                         text = "${fps}fps",
                         style = MonoTelemetrySmall,
-                        color = if (selected) PureBlack else PureWhite,
+                        color = if (selected) onAccent else PureWhite,
                         modifier = Modifier
                             .clip(RoundedCornerShape(10.dp))
                             .background(if (selected) accent else CardSlate)
@@ -316,24 +321,63 @@ fun VideoEditorScreen(
             }
 
             // Leica & Film Filters for Video Export
-            Text("Leica & Camera Filters", style = MaterialTheme.typography.titleMedium, color = PureWhite)
+            Text("Bộ lọc Leica & Máy ảnh", style = MaterialTheme.typography.titleMedium, color = PureWhite)
+            var videoFilterTab by remember { mutableStateOf(com.example.ui.components.FilterShelfTab.ALL) }
+            val videoFilters = remember(videoFilterTab) { videoFilterTab.filterPresets() }
             Row(
                 modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                com.example.ui.components.FilterShelfTab.entries.forEach { tab ->
+                    com.example.ui.components.FilterGroupChip(
+                        label = "${tab.label} (${if (tab == com.example.ui.components.FilterShelfTab.ALL) com.example.model.PhotoFilterPreset.entries.size else tab.filterPresets().size - 1})",
+                        selected = videoFilterTab == tab,
+                        isLeicaDot = tab.isLeicaDot,
+                        onClick = { videoFilterTab = tab }
+                    )
+                }
+            }
+            androidx.compose.foundation.lazy.LazyRow(
+                modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                com.example.model.PhotoFilterPreset.entries.forEach { preset ->
+                items(
+                    count = videoFilters.size,
+                    key = { videoFilters[it].name }
+                ) { idx ->
+                    val preset = videoFilters[idx]
                     val selected = config.filter == preset
-                    Text(
-                        text = preset.label,
-                        style = MonoTelemetrySmall,
-                        color = if (selected) PureBlack else PureWhite,
+                    Column(
                         modifier = Modifier
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(if (selected) accent else CardSlate)
+                            .width(66.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (selected) accent.copy(alpha = 0.20f) else CardSlate)
+                            .border(
+                                1.dp,
+                                if (selected) accent else HairlineBorder,
+                                RoundedCornerShape(12.dp)
+                            )
                             .clickable { config = config.copy(filter = preset) }
-                            .padding(horizontal = 12.dp, vertical = 7.dp)
-                            .testTag("video_editor_filter_${preset.name.lowercase()}")
-                    )
+                            .padding(horizontal = 6.dp, vertical = 6.dp)
+                            .testTag("video_editor_filter_${preset.name.lowercase()}"),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        com.example.ui.components.FilterPreviewThumb(
+                            preset = preset,
+                            selected = selected,
+                            accent = accent,
+                            size = 46.dp,
+                            cornerRadius = 10.dp
+                        )
+                        Text(
+                            text = preset.label,
+                            style = MonoTelemetrySmall.copy(fontSize = 10.sp),
+                            color = if (selected) accent else PureWhite,
+                            maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                        )
+                    }
                 }
             }
             if (config.filter != com.example.model.PhotoFilterPreset.NATURAL) {
@@ -390,6 +434,7 @@ private fun LabeledVideoSlider(
 @Composable
 private fun AiCheckboxRow(label: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
     val accent = LocalAccentColor.current
+    val onAccent = LocalOnAccentColor.current
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -405,7 +450,7 @@ private fun AiCheckboxRow(label: String, checked: Boolean, onCheckedChange: (Boo
         Checkbox(
             checked = checked,
             onCheckedChange = onCheckedChange,
-            colors = CheckboxDefaults.colors(checkedColor = accent, checkmarkColor = PureBlack)
+            colors = CheckboxDefaults.colors(checkedColor = accent, checkmarkColor = onAccent)
         )
     }
 }

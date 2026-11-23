@@ -55,7 +55,7 @@ data class HungCamSettings(
     val aiLocalProcessingOnly: Boolean = true,
     // Interface settings
     val darkModeEnabled: Boolean = true,
-    val accentColorPreset: AccentColorPreset = AccentColorPreset.LEICA_AMBER,
+    val accentColorPreset: AccentColorPreset = AccentColorPreset.CRIMSON_PRO,
     val hapticFeedbackEnabled: Boolean = true,
     val animationsEnabled: Boolean = true,
     // Privacy settings
@@ -125,7 +125,7 @@ class SettingsDataStore(private val context: Context) {
             aiAutoStabilize = prefs[Keys.AI_STABILIZE] ?: true,
             aiLocalProcessingOnly = prefs[Keys.AI_LOCAL_ONLY] ?: true,
             darkModeEnabled = prefs[Keys.DARK_MODE] ?: true,
-            accentColorPreset = enumValueOrDefault(prefs[Keys.ACCENT_PRESET], AccentColorPreset.LEICA_AMBER),
+            accentColorPreset = enumValueOrDefault(prefs[Keys.ACCENT_PRESET], AccentColorPreset.CRIMSON_PRO),
             hapticFeedbackEnabled = prefs[Keys.HAPTICS] ?: true,
             animationsEnabled = prefs[Keys.ANIMATIONS] ?: true,
             locationMetadataEnabled = prefs[Keys.LOCATION_META] ?: false
@@ -161,7 +161,7 @@ class SettingsDataStore(private val context: Context) {
                 aiAutoStabilize = prefs[Keys.AI_STABILIZE] ?: true,
                 aiLocalProcessingOnly = prefs[Keys.AI_LOCAL_ONLY] ?: true,
                 darkModeEnabled = prefs[Keys.DARK_MODE] ?: true,
-                accentColorPreset = enumValueOrDefault(prefs[Keys.ACCENT_PRESET], AccentColorPreset.LEICA_AMBER),
+                accentColorPreset = enumValueOrDefault(prefs[Keys.ACCENT_PRESET], AccentColorPreset.CRIMSON_PRO),
                 hapticFeedbackEnabled = prefs[Keys.HAPTICS] ?: true,
                 animationsEnabled = prefs[Keys.ANIMATIONS] ?: true,
                 locationMetadataEnabled = prefs[Keys.LOCATION_META] ?: false

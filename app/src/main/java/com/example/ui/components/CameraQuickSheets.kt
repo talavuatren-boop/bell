@@ -24,6 +24,7 @@ import androidx.compose.material.icons.outlined.AspectRatio
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.BlurOn
 import androidx.compose.material.icons.outlined.BrandingWatermark
+import androidx.compose.material.icons.outlined.BrightnessHigh
 import androidx.compose.material.icons.outlined.CameraEnhance
 import androidx.compose.material.icons.outlined.CenterFocusStrong
 import androidx.compose.material.icons.outlined.EmojiEmotions
@@ -38,7 +39,6 @@ import androidx.compose.material.icons.outlined.MicOff
 import androidx.compose.material.icons.outlined.MotionPhotosOn
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.RawOn
-import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.SlowMotionVideo
 import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material.icons.outlined.Straighten
@@ -48,7 +48,6 @@ import androidx.compose.material.icons.outlined.Vibration
 import androidx.compose.material.icons.outlined.Videocam
 import androidx.compose.material.icons.outlined.VolumeOff
 import androidx.compose.material.icons.outlined.VolumeUp
-import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -133,7 +132,6 @@ fun ModeQuickControlGrid(
     onCycleSlowMo: () -> Unit,
     onCycleTimelapseSpeed: () -> Unit,
     onOpenFilters: () -> Unit,
-    onOpenSettings: () -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -225,17 +223,6 @@ fun ModeQuickControlGrid(
                         onDismiss()
                         onOpenFilters()
                     }
-                ),
-                QuickGridAction(
-                    id = "settings",
-                    label = "Cài đặt",
-                    icon = Icons.Outlined.Settings,
-                    isActive = false,
-                    testTag = "quick_grid_settings",
-                    onClick = {
-                        onDismiss()
-                        onOpenSettings()
-                    }
                 )
             )
 
@@ -298,17 +285,6 @@ fun ModeQuickControlGrid(
                         onDismiss()
                         onOpenFilters()
                     }
-                ),
-                QuickGridAction(
-                    id = "settings",
-                    label = "Cài đặt",
-                    icon = Icons.Outlined.Settings,
-                    isActive = false,
-                    testTag = "quick_grid_settings",
-                    onClick = {
-                        onDismiss()
-                        onOpenSettings()
-                    }
                 )
             )
 
@@ -356,6 +332,13 @@ fun ModeQuickControlGrid(
                     onClick = onToggleWatermark
                 ),
                 QuickGridAction(
+                    id = "level",
+                    label = "Thước thủy",
+                    icon = Icons.Outlined.Straighten,
+                    isActive = settings.electronicLevelEnabled,
+                    onClick = onToggleLevel
+                ),
+                QuickGridAction(
                     id = "filters",
                     label = if (activeFilter == PhotoFilterPreset.NATURAL) "Bộ lọc" else activeFilter.label,
                     icon = Icons.Outlined.FilterVintage,
@@ -363,17 +346,6 @@ fun ModeQuickControlGrid(
                     onClick = {
                         onDismiss()
                         onOpenFilters()
-                    }
-                ),
-                QuickGridAction(
-                    id = "settings",
-                    label = "Cài đặt",
-                    icon = Icons.Outlined.Settings,
-                    isActive = false,
-                    testTag = "quick_grid_settings",
-                    onClick = {
-                        onDismiss()
-                        onOpenSettings()
                     }
                 )
             )
@@ -403,7 +375,7 @@ fun ModeQuickControlGrid(
                 QuickGridAction(
                     id = "zebra",
                     label = "Cảnh báo cháy",
-                    icon = Icons.Outlined.WarningAmber,
+                    icon = Icons.Outlined.BrightnessHigh,
                     isActive = proParams.exposureWarningEnabled,
                     onClick = onToggleExposureWarning
                 ),
@@ -427,17 +399,6 @@ fun ModeQuickControlGrid(
                     icon = Icons.Outlined.Straighten,
                     isActive = settings.electronicLevelEnabled,
                     onClick = onToggleLevel
-                ),
-                QuickGridAction(
-                    id = "settings",
-                    label = "Cài đặt",
-                    icon = Icons.Outlined.Settings,
-                    isActive = false,
-                    testTag = "quick_grid_settings",
-                    onClick = {
-                        onDismiss()
-                        onOpenSettings()
-                    }
                 )
             )
 
@@ -464,14 +425,13 @@ fun ModeQuickControlGrid(
                     onClick = onToggleLevel
                 ),
                 QuickGridAction(
-                    id = "settings",
-                    label = "Cài đặt",
-                    icon = Icons.Outlined.Settings,
-                    isActive = false,
-                    testTag = "quick_grid_settings",
+                    id = "filters",
+                    label = if (activeFilter == PhotoFilterPreset.NATURAL) "Bộ lọc" else activeFilter.label,
+                    icon = Icons.Outlined.FilterVintage,
+                    isActive = activeFilter != PhotoFilterPreset.NATURAL,
                     onClick = {
                         onDismiss()
-                        onOpenSettings()
+                        onOpenFilters()
                     }
                 )
             )
@@ -499,14 +459,13 @@ fun ModeQuickControlGrid(
                     onClick = onToggleLevel
                 ),
                 QuickGridAction(
-                    id = "settings",
-                    label = "Cài đặt",
-                    icon = Icons.Outlined.Settings,
-                    isActive = false,
-                    testTag = "quick_grid_settings",
+                    id = "filters",
+                    label = if (activeFilter == PhotoFilterPreset.NATURAL) "Bộ lọc" else activeFilter.label,
+                    icon = Icons.Outlined.FilterVintage,
+                    isActive = activeFilter != PhotoFilterPreset.NATURAL,
                     onClick = {
                         onDismiss()
-                        onOpenSettings()
+                        onOpenFilters()
                     }
                 )
             )
@@ -551,24 +510,34 @@ fun ModeQuickControlGrid(
                                 horizontalAlignment = Alignment.CenterHorizontally,
                                 verticalArrangement = Arrangement.Center
                             ) {
-                                val tint = if (action.isActive) accent else PureWhite
-                                if (action.badgeText != null) {
-                                    Text(
-                                        text = action.badgeText,
-                                        style = MonoTelemetrySmall.copy(
-                                            fontSize = 14.sp,
-                                            fontWeight = FontWeight.ExtraBold
-                                        ),
-                                        color = tint,
-                                        maxLines = 1
-                                    )
-                                } else if (action.icon != null) {
-                                    Icon(
-                                        imageVector = action.icon,
-                                        contentDescription = action.label,
-                                        tint = tint,
-                                        modifier = Modifier.size(22.dp)
-                                    )
+                                val iconTint = if (action.isActive) accent else PureWhite.copy(alpha = 0.78f)
+                                Box(contentAlignment = Alignment.TopEnd) {
+                                    if (action.badgeText != null) {
+                                        Text(
+                                            text = action.badgeText,
+                                            style = MonoTelemetrySmall.copy(
+                                                fontSize = 14.sp,
+                                                fontWeight = FontWeight.ExtraBold
+                                            ),
+                                            color = iconTint,
+                                            maxLines = 1
+                                        )
+                                    } else if (action.icon != null) {
+                                        Icon(
+                                            imageVector = action.icon,
+                                            contentDescription = action.label,
+                                            tint = iconTint,
+                                            modifier = Modifier.size(22.dp)
+                                        )
+                                    }
+                                    if (action.isActive) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(5.dp)
+                                                .clip(CircleShape)
+                                                .background(accent)
+                                        )
+                                    }
                                 }
                                 Spacer(modifier = Modifier.height(5.dp))
                                 Text(
@@ -578,7 +547,7 @@ fun ModeQuickControlGrid(
                                         lineHeight = 13.sp,
                                         fontWeight = if (action.isActive) FontWeight.SemiBold else FontWeight.Normal
                                     ),
-                                    color = if (action.isActive) accent else PureWhite.copy(alpha = 0.88f),
+                                    color = if (action.isActive) PureWhite else MutedSlate,
                                     textAlign = TextAlign.Center,
                                     maxLines = 2,
                                     overflow = TextOverflow.Ellipsis

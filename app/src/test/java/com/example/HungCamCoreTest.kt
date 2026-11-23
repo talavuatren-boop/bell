@@ -579,7 +579,7 @@ class HungCamCoreTest {
         }
 
         val leicaPresets = PhotoFilterPreset.entries.filter { it.isLeica }
-        assertTrue("Expected at least 6 Leica filter presets", leicaPresets.size >= 6)
+        assertTrue("Expected at least 86 Leica filter presets", leicaPresets.size >= 86)
 
         for (preset in PhotoFilterPreset.entries) {
             val out = ImageProcessor.applyFilterToBitmap(src, preset, intensity = 0.85f)

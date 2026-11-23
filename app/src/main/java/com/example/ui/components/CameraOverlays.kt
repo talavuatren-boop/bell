@@ -46,7 +46,6 @@ import com.example.ui.theme.LevelGreen
 import com.example.ui.theme.LocalAccentColor
 import com.example.ui.theme.MonoTelemetrySmall
 import com.example.ui.theme.PureWhite
-import com.example.ui.theme.WarningAmber
 import kotlin.math.roundToInt
 
 @Composable
@@ -233,7 +232,7 @@ fun LiveHistogramHud(
                 Text(
                     text = "LO ${String.format("%.1f", shadowClipPct)}%",
                     style = MonoTelemetrySmall.copy(fontSize = 9.sp),
-                    color = if (shadowClipPct > 8f) WarningAmber else PureWhite.copy(alpha = 0.75f)
+                    color = if (shadowClipPct > 8f) ErrorCrimson else PureWhite.copy(alpha = 0.75f)
                 )
             }
         }

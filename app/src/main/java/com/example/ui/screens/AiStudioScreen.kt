@@ -3,16 +3,20 @@ package com.example.ui.screens
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -70,6 +74,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -80,12 +86,14 @@ import com.example.model.AiProcessingMode
 import com.example.model.AiToolType
 import com.example.model.MediaItemType
 import com.example.ui.MainViewModel
+import com.example.ui.components.springPressScale
 import com.example.ui.theme.CardSlate
 import com.example.ui.theme.CrimsonShutter
 import com.example.ui.theme.ElevatedObsidian
 import com.example.ui.theme.HairlineBorder
 import com.example.ui.theme.LevelGreen
 import com.example.ui.theme.LocalAccentColor
+import com.example.ui.theme.LocalOnAccentColor
 import com.example.ui.theme.MonoTelemetryLarge
 import com.example.ui.theme.MonoTelemetrySmall
 import com.example.ui.theme.MutedSlate
@@ -102,6 +110,7 @@ fun AiStudioScreen(
     modifier: Modifier = Modifier
 ) {
     val accent = LocalAccentColor.current
+    val onAccent = LocalOnAccentColor.current
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val assets by viewModel.activeAssets.collectAsStateWithLifecycle()
     val aiProgress by viewModel.aiProgress.collectAsStateWithLifecycle()
@@ -168,7 +177,10 @@ fun AiStudioScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Column(
+                    modifier = Modifier.weight(1f).padding(end = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -177,18 +189,19 @@ fun AiStudioScreen(
                             imageVector = Icons.Default.AutoAwesome,
                             contentDescription = null,
                             tint = accent,
-                            modifier = Modifier.size(18.dp)
+                            modifier = Modifier.size(16.dp)
                         )
                         Text(
                             text = "HUNG AI STUDIO",
-                            style = MonoTelemetrySmall.copy(fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp),
+                            style = MonoTelemetrySmall.copy(fontWeight = FontWeight.Bold, letterSpacing = 1.1.sp),
                             color = accent
                         )
                     }
                     Text(
-                        text = "Computational Lab",
+                        text = "Phòng Lab AI",
                         style = MaterialTheme.typography.headlineMedium,
-                        color = PureWhite
+                        color = PureWhite,
+                        maxLines = 1
                     )
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -196,44 +209,70 @@ fun AiStudioScreen(
                     ) {
                         Icon(Icons.Default.Lock, contentDescription = null, tint = LevelGreen, modifier = Modifier.size(12.dp))
                         Text(
-                            text = "100% On-Device • Zero Cloud Uploads",
+                            text = "100% Xử lý trên máy • Riêng tư tuyệt đối",
                             style = MonoTelemetrySmall.copy(fontSize = 10.sp),
-                            color = LevelGreen
+                            color = LevelGreen,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
 
-                OutlinedButton(
-                    onClick = {
-                        pickerLauncher.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
-                        )
-                    },
-                    modifier = Modifier.testTag("ai_studio_pick_media")
+                val pickInt = remember { MutableInteractionSource() }
+                Row(
+                    modifier = Modifier
+                        .springPressScale(pickInt, pressedScale = 0.90f)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(ElevatedObsidian)
+                        .border(1.dp, accent.copy(alpha = 0.65f), RoundedCornerShape(14.dp))
+                        .clickable(interactionSource = pickInt, indication = null) {
+                            pickerLauncher.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
+                            )
+                        }
+                        .padding(horizontal = 12.dp, vertical = 9.dp)
+                        .testTag("ai_studio_pick_media"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Icon(Icons.Default.AddPhotoAlternate, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Import")
+                    Icon(
+                        Icons.Default.AddPhotoAlternate,
+                        contentDescription = null,
+                        tint = accent,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Text(
+                        text = "Nhập ảnh",
+                        style = MaterialTheme.typography.labelLarge.copy(fontSize = 12.sp, fontWeight = FontWeight.SemiBold),
+                        color = PureWhite,
+                        maxLines = 1,
+                        softWrap = false
+                    )
                 }
             }
         }
 
-        // Featured Creative Suites: Video Merge + Stickers & Meme
+        // Featured Creative Suites: Equal-height Video Merge + Stickers & Meme
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(IntrinsicSize.Max),
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
+            val mergeInt = remember { MutableInteractionSource() }
             Row(
                 modifier = Modifier
                     .weight(1f)
+                    .fillMaxHeight()
+                    .springPressScale(mergeInt, pressedScale = 0.95f)
                     .clip(RoundedCornerShape(16.dp))
                     .background(
                         Brush.horizontalGradient(
                             listOf(CardSlate, accent.copy(alpha = 0.14f))
                         )
                     )
-                    .border(1.dp, accent.copy(alpha = 0.35f), RoundedCornerShape(16.dp))
-                    .clickable(onClick = onOpenVideoMerge)
+                    .border(1.dp, accent.copy(alpha = 0.45f), RoundedCornerShape(16.dp))
+                    .clickable(interactionSource = mergeInt, indication = null, onClick = onOpenVideoMerge)
                     .padding(12.dp)
                     .testTag("ai_studio_open_video_merge"),
                 verticalAlignment = Alignment.CenterVertically,
@@ -246,29 +285,35 @@ fun AiStudioScreen(
                         .background(accent),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Default.MergeType, contentDescription = "Video Merge", tint = PureBlack)
+                    Icon(Icons.Default.MergeType, contentDescription = "Ghép Video", tint = onAccent)
                 }
                 Column {
                     Text(
-                        text = "Video Merge",
+                        text = "Ghép Video",
                         style = MaterialTheme.typography.titleMedium.copy(fontSize = 14.sp),
-                        color = PureWhite
+                        color = PureWhite,
+                        maxLines = 1
                     )
                     Text(
-                        text = "Join & Split 2 Clips",
+                        text = "Nối & Chia đôi clip",
                         style = MonoTelemetrySmall.copy(fontSize = 10.sp),
-                        color = accent
+                        color = accent,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }
 
+            val memeInt = remember { MutableInteractionSource() }
             Row(
                 modifier = Modifier
                     .weight(1f)
+                    .fillMaxHeight()
+                    .springPressScale(memeInt, pressedScale = 0.95f)
                     .clip(RoundedCornerShape(16.dp))
                     .background(CardSlate)
                     .border(1.dp, HairlineBorder, RoundedCornerShape(16.dp))
-                    .clickable {
+                    .clickable(interactionSource = memeInt, indication = null) {
                         val photoTarget = selectedAsset?.takeIf { it.typeEnum != MediaItemType.VIDEO } ?: latestPhoto
                         if (photoTarget != null) {
                             onOpenStickersMeme(photoTarget)
@@ -288,21 +333,24 @@ fun AiStudioScreen(
                         .size(38.dp)
                         .clip(RoundedCornerShape(10.dp))
                         .background(ElevatedObsidian)
-                        .border(1.dp, accent.copy(alpha = 0.5f), RoundedCornerShape(10.dp)),
+                        .border(1.dp, accent.copy(alpha = 0.55f), RoundedCornerShape(10.dp)),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Default.EmojiEmotions, contentDescription = "Stickers & Meme", tint = accent)
+                    Icon(Icons.Default.EmojiEmotions, contentDescription = "Sticker & Meme", tint = accent)
                 }
                 Column {
                     Text(
-                        text = "Stickers & Meme",
+                        text = "Sticker & Meme",
                         style = MaterialTheme.typography.titleMedium.copy(fontSize = 14.sp),
-                        color = PureWhite
+                        color = PureWhite,
+                        maxLines = 1
                     )
                     Text(
-                        text = "Stamps & Captions",
+                        text = "Tem & Chữ vui",
                         style = MonoTelemetrySmall.copy(fontSize = 10.sp),
-                        color = MutedSlate
+                        color = MutedSlate,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }
@@ -416,13 +464,13 @@ fun AiStudioScreen(
                     ) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.CompareArrows,
-                            contentDescription = "Drag to compare",
-                            tint = PureBlack,
+                            contentDescription = "Kéo để so sánh",
+                            tint = onAccent,
                             modifier = Modifier.size(18.dp)
                         )
                     }
                     Text(
-                        text = "BEFORE",
+                        text = "TRƯỚC",
                         style = MonoTelemetrySmall.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold),
                         color = PureWhite,
                         modifier = Modifier
@@ -432,7 +480,7 @@ fun AiStudioScreen(
                             .padding(horizontal = 8.dp, vertical = 3.dp)
                     )
                     Text(
-                        text = "AFTER",
+                        text = "SAU",
                         style = MonoTelemetrySmall.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold),
                         color = accent,
                         modifier = Modifier
@@ -450,7 +498,10 @@ fun AiStudioScreen(
                     modifier = Modifier.fillMaxSize()
                 )
             } else {
-                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(20.dp)) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.padding(24.dp)
+                ) {
                     Box(
                         modifier = Modifier
                             .size(56.dp)
@@ -461,13 +512,19 @@ fun AiStudioScreen(
                     ) {
                         Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = accent, modifier = Modifier.size(28.dp))
                     }
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Text("Pick or Tap a Recent Capture", style = MaterialTheme.typography.titleMedium, color = PureWhite)
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "Chọn ảnh hoặc video bên trên",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = PureWhite,
+                        textAlign = TextAlign.Center
+                    )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "Denoise, upscale 2x, stabilize video, or add stickers & memes",
+                        text = "Khử nhiễu, siêu nét 2x, chống rung video hoặc thêm sticker & meme",
                         style = MaterialTheme.typography.bodyMedium,
-                        color = MutedSlate
+                        color = MutedSlate,
+                        textAlign = TextAlign.Center
                     )
                 }
             }
@@ -484,7 +541,7 @@ fun AiStudioScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
+                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                     Text(
                         text = "${res.originalWidth}×${res.originalHeight} → ${res.outputWidth}×${res.outputHeight}",
                         style = MonoTelemetrySmall,
@@ -499,7 +556,7 @@ fun AiStudioScreen(
                 Button(
                     onClick = { viewModel.saveAiEnhancedPhotoCopy() },
                     enabled = !aiOutput.savedCopySuccess,
-                    colors = ButtonDefaults.buttonColors(containerColor = accent, contentColor = PureBlack),
+                    colors = ButtonDefaults.buttonColors(containerColor = accent, contentColor = onAccent),
                     modifier = Modifier.testTag("ai_save_copy_button")
                 ) {
                     Icon(
@@ -508,7 +565,7 @@ fun AiStudioScreen(
                         modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text(if (aiOutput.savedCopySuccess) "Saved" else "Save Copy")
+                    Text(if (aiOutput.savedCopySuccess) "Đã lưu" else "Lưu bản mới")
                 }
             }
         }
@@ -525,7 +582,7 @@ fun AiStudioScreen(
             ) {
                 Icon(Icons.Default.CheckCircle, contentDescription = null, tint = LevelGreen)
                 Text(
-                    text = "Enhanced video saved to Gallery (${aiOutput.processingTimeMs} ms)",
+                    text = "Video AI đã lưu vào Thư viện (${aiOutput.processingTimeMs} ms)",
                     style = MonoTelemetrySmall,
                     color = PureWhite
                 )
@@ -533,7 +590,7 @@ fun AiStudioScreen(
         }
 
         // Icon-Backed AI Tool Selection Row
-        Text("AI Enhancement Engine", style = MaterialTheme.typography.titleMedium, color = PureWhite)
+        Text("Công cụ AI", style = MaterialTheme.typography.titleMedium, color = PureWhite)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -553,12 +610,23 @@ fun AiStudioScreen(
                     AiToolType.FRAME_ENHANCE -> Icons.Default.AutoFixHigh
                     AiToolType.FRAME_INTERPOLATE -> Icons.Default.SlowMotionVideo
                 }
+                val toolInteraction = remember(tool) { MutableInteractionSource() }
+                val cardBg by animateColorAsState(
+                    targetValue = if (selected) accent else CardSlate,
+                    animationSpec = tween(180),
+                    label = "aiToolBg"
+                )
                 Column(
                     modifier = Modifier
+                        .springPressScale(toolInteraction, pressedScale = 0.92f)
                         .clip(RoundedCornerShape(14.dp))
-                        .background(if (selected) accent else CardSlate)
+                        .background(cardBg)
                         .border(1.dp, if (selected) accent else HairlineBorder, RoundedCornerShape(14.dp))
-                        .clickable(enabled = compatible && !aiProgress.isRunning) { selectedTool = tool }
+                        .clickable(
+                            interactionSource = toolInteraction,
+                            indication = null,
+                            enabled = compatible && !aiProgress.isRunning
+                        ) { selectedTool = tool }
                         .padding(horizontal = 12.dp, vertical = 10.dp)
                         .testTag("ai_tool_${tool.name.lowercase()}"),
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -568,8 +636,8 @@ fun AiStudioScreen(
                         imageVector = icon,
                         contentDescription = null,
                         tint = when {
-                            !compatible -> MutedSlate.copy(alpha = 0.4f)
-                            selected -> PureBlack
+                            !compatible -> MutedSlate.copy(alpha = 0.38f)
+                            selected -> onAccent
                             else -> accent
                         },
                         modifier = Modifier.size(18.dp)
@@ -578,36 +646,56 @@ fun AiStudioScreen(
                         text = tool.label,
                         style = MaterialTheme.typography.labelLarge.copy(fontSize = 11.sp),
                         color = when {
-                            !compatible -> MutedSlate.copy(alpha = 0.4f)
-                            selected -> PureBlack
+                            !compatible -> MutedSlate.copy(alpha = 0.38f)
+                            selected -> onAccent
                             else -> PureWhite
-                        }
+                        },
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
             }
         }
 
-        // Processing Mode Selector (FAST / BALANCED / QUALITY)
-        Text("Processing Quality Mode", style = MaterialTheme.typography.titleMedium, color = PureWhite)
+        // Processing Mode Selector (NHANH / CÂN BẰNG / SIÊU NÉT) with IntrinsicSize.Max so zero text clips!
+        Text("Chế độ xử lý", style = MaterialTheme.typography.titleMedium, color = PureWhite)
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(IntrinsicSize.Max),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             AiProcessingMode.entries.forEach { m ->
                 val selected = selectedMode == m
+                val modeInteraction = remember(m) { MutableInteractionSource() }
                 Column(
                     modifier = Modifier
                         .weight(1f)
+                        .fillMaxHeight()
+                        .springPressScale(modeInteraction, pressedScale = 0.95f)
                         .clip(RoundedCornerShape(14.dp))
-                        .background(if (selected) accent.copy(alpha = 0.16f) else CardSlate)
+                        .background(if (selected) accent.copy(alpha = 0.14f) else CardSlate)
                         .border(1.dp, if (selected) accent else HairlineBorder, RoundedCornerShape(14.dp))
-                        .clickable(enabled = !aiProgress.isRunning) { selectedMode = m }
-                        .padding(10.dp)
-                        .testTag("ai_mode_${m.name.lowercase()}")
+                        .clickable(
+                            interactionSource = modeInteraction,
+                            indication = null,
+                            enabled = !aiProgress.isRunning
+                        ) { selectedMode = m }
+                        .padding(11.dp)
+                        .testTag("ai_mode_${m.name.lowercase()}"),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    Text(m.label, style = MonoTelemetryLarge.copy(fontSize = 12.sp), color = if (selected) accent else PureWhite)
-                    Spacer(modifier = Modifier.height(3.dp))
-                    Text(m.subtitle, style = MaterialTheme.typography.bodyMedium.copy(fontSize = 11.sp), color = MutedSlate)
+                    Text(
+                        text = m.label,
+                        style = MonoTelemetryLarge.copy(fontSize = 11.5.sp, fontWeight = FontWeight.Bold),
+                        color = if (selected) accent else PureWhite,
+                        maxLines = 1
+                    )
+                    Text(
+                        text = m.subtitle,
+                        style = MaterialTheme.typography.bodyMedium.copy(fontSize = 11.sp, lineHeight = 14.sp),
+                        color = MutedSlate
+                    )
                 }
             }
         }
@@ -656,7 +744,7 @@ fun AiStudioScreen(
                         ) {
                             Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text("Cancel")
+                            Text("Hủy")
                         }
                     }
                 }
@@ -666,7 +754,7 @@ fun AiStudioScreen(
         Button(
             onClick = { viewModel.runAiStudioProcessing(selectedTool, selectedMode) },
             enabled = selectedAsset != null && !aiProgress.isRunning,
-            colors = ButtonDefaults.buttonColors(containerColor = accent, contentColor = PureBlack),
+            colors = ButtonDefaults.buttonColors(containerColor = accent, contentColor = onAccent),
             modifier = Modifier
                 .fillMaxWidth()
                 .height(52.dp)
@@ -675,7 +763,7 @@ fun AiStudioScreen(
             Icon(Icons.Default.AutoAwesome, contentDescription = null)
             Spacer(modifier = Modifier.width(8.dp))
             Text(
-                text = if (selectedAsset == null) "Select Media First" else "Run ${selectedTool.label} (${selectedMode.label})",
+                text = if (selectedAsset == null) "Chọn ảnh hoặc video trước" else "Chạy ${selectedTool.label} (${selectedMode.label})",
                 style = MaterialTheme.typography.titleMedium
             )
         }

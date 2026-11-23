@@ -43,6 +43,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -69,6 +70,7 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -134,10 +136,12 @@ import com.example.ui.components.SpringIconButton
 import com.example.ui.components.TapFocusReticle
 import com.example.ui.components.springPressScale
 import com.example.ui.theme.CardSlate
+import com.example.ui.theme.CrimsonLeica
 import com.example.ui.theme.CrimsonShutter
 import com.example.ui.theme.ElevatedObsidian
 import com.example.ui.theme.HairlineBorder
 import com.example.ui.theme.LocalAccentColor
+import com.example.ui.theme.LocalOnAccentColor
 import com.example.ui.theme.MonoTelemetryLarge
 import com.example.ui.theme.MonoTelemetrySmall
 import com.example.ui.theme.MutedSlate
@@ -158,6 +162,7 @@ fun CameraScreen(
 ) {
     val context = LocalContext.current
     val accent = LocalAccentColor.current
+    val onAccent = LocalOnAccentColor.current
 
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val capabilities by viewModel.capabilities.collectAsStateWithLifecycle()
@@ -171,8 +176,6 @@ fun CameraScreen(
     val proCaptureType by viewModel.proCaptureType.collectAsStateWithLifecycle()
     val portraitBokeh by viewModel.portraitBokehStrength.collectAsStateWithLifecycle()
     val runtime by viewModel.cameraRuntime.collectAsStateWithLifecycle()
-    val telemetry by viewModel.telemetry.collectAsStateWithLifecycle()
-    val focusPeaking by viewModel.focusPeakingData.collectAsStateWithLifecycle()
     val timelapseSpeed by viewModel.timelapseSpeed.collectAsStateWithLifecycle()
     val slowMoOption by viewModel.slowMoOption.collectAsStateWithLifecycle()
     val activeFilter by viewModel.cameraFilter.collectAsStateWithLifecycle()
@@ -296,7 +299,7 @@ fun CameraScreen(
                     onClick = {
                         permLauncher.launch(arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO))
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = accent, contentColor = PureBlack),
+                    colors = ButtonDefaults.buttonColors(containerColor = accent, contentColor = onAccent),
                     modifier = Modifier.testTag("grant_camera_permission_button")
                 ) {
                     Text("Bật quyền Camera")
@@ -428,7 +431,7 @@ fun CameraScreen(
                             Text(
                                 text = proCaptureType.label,
                                 style = MonoTelemetrySmall.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold),
-                                color = PureBlack,
+                                color = onAccent,
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(10.dp))
                                     .background(accent)
@@ -528,7 +531,7 @@ fun CameraScreen(
                 )
             }
 
-            // Right Minimal Telemetry: Recording Clock OR Active Filter/Timer/HDR Pill
+            // Right Minimal Telemetry + Top-Right Settings Gear: Recording Clock OR Active Filter/Focal + Gear
             Row(
                 modifier = Modifier.align(Alignment.CenterEnd),
                 verticalAlignment = Alignment.CenterVertically,
@@ -567,14 +570,42 @@ fun CameraScreen(
                         text = if (activeFilter != PhotoFilterPreset.NATURAL) activeFilter.label else opticLabel,
                         style = MonoTelemetrySmall.copy(fontSize = 10.sp, fontWeight = FontWeight.SemiBold),
                         color = if (activeFilter != PhotoFilterPreset.NATURAL) accent else MutedSlate,
+                        maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                         modifier = Modifier
+                            .widthIn(max = 72.dp)
                             .clip(RoundedCornerShape(10.dp))
                             .clickable {
                                 viewModel.performHapticTick()
-                                showQuickGrid = !showQuickGrid
+                                if (activeFilter != PhotoFilterPreset.NATURAL) {
+                                    showQuickGrid = false
+                                    showFilterStrip = !showFilterStrip
+                                } else {
+                                    showFilterStrip = false
+                                    showQuickGrid = !showQuickGrid
+                                }
                             }
-                            .padding(horizontal = 6.dp, vertical = 4.dp)
+                            .padding(horizontal = 5.dp, vertical = 4.dp)
                     )
+                    SpringIconButton(
+                        onClick = {
+                            viewModel.performHapticTick()
+                            onOpenSettings()
+                        },
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF181A20))
+                            .border(0.6.dp, HairlineBorder, CircleShape)
+                            .testTag("camera_top_settings_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Settings,
+                            contentDescription = "Cài đặt Camera",
+                            tint = PureWhite,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
                 }
             }
         }
@@ -639,7 +670,8 @@ fun CameraScreen(
                             }
                         }
                 ) {
-                    val liveFilterPaint = remember(activeFilter, filterIntensity) {
+                    val filterKey = activeFilter to filterIntensity
+                    val liveFilterPaint = remember(filterKey) {
                         if (activeFilter == PhotoFilterPreset.NATURAL) {
                             null
                         } else {
@@ -650,38 +682,47 @@ fun CameraScreen(
                             }
                         }
                     }
+                    // Cache last applied filter & rotation so recompositions never force 60fps-killing TextureView invalidates
+                    val lastAppliedState = remember { arrayOfNulls<Any>(2) }
 
                     AndroidView(
                         factory = { ctx ->
+                            val rot = getDisplayRotationDegrees(ctx)
                             TextureView(ctx).also { tv ->
                                 tv.setLayerType(android.view.View.LAYER_TYPE_HARDWARE, liveFilterPaint)
                                 tv.setLayerPaint(liveFilterPaint)
+                                lastAppliedState[0] = filterKey
+                                lastAppliedState[1] = rot
                                 tv.addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
                                     if ((right - left) != (oldRight - oldLeft) || (bottom - top) != (oldBottom - oldTop)) {
                                         viewModel.cameraEngine.refreshTextureTransform()
                                     }
                                 }
-                                viewModel.cameraEngine.attachTextureView(tv, getDisplayRotationDegrees(ctx))
+                                viewModel.cameraEngine.attachTextureView(tv, rot)
                             }
                         },
                         update = { tv ->
-                            tv.setLayerType(android.view.View.LAYER_TYPE_HARDWARE, liveFilterPaint)
-                            tv.setLayerPaint(liveFilterPaint)
-                            tv.invalidate()
-                            viewModel.cameraEngine.updateDisplayRotation(getDisplayRotationDegrees(tv.context))
+                            if (lastAppliedState[0] != filterKey) {
+                                tv.setLayerType(android.view.View.LAYER_TYPE_HARDWARE, liveFilterPaint)
+                                tv.setLayerPaint(liveFilterPaint)
+                                tv.invalidate()
+                                lastAppliedState[0] = filterKey
+                            }
+                            val rot = getDisplayRotationDegrees(tv.context)
+                            if (lastAppliedState[1] != rot) {
+                                viewModel.cameraEngine.updateDisplayRotation(rot)
+                                lastAppliedState[1] = rot
+                            }
                         },
                         modifier = Modifier.fillMaxSize()
                     )
 
                     if (mode == CameraMode.PRO && proParams.focusPeakingEnabled) {
-                        FocusPeakingOverlay(data = focusPeaking)
+                        IsolatedFocusPeakingOverlay(viewModel = viewModel)
                     }
                     GridOverlay(gridType = settings.gridType)
                     if (settings.electronicLevelEnabled) {
-                        ElectronicLevelOverlay(
-                            rollDegrees = telemetry.rollDegrees,
-                            isAligned = telemetry.isLevelAligned
-                        )
+                        IsolatedElectronicLevelOverlay(viewModel = viewModel)
                     }
                     TapFocusReticle(normalizedPos = focusPoint, visible = showFocusReticle)
                     SelfTimerCountdownHud(
@@ -692,7 +733,7 @@ fun CameraScreen(
                 }
             }
 
-            // Live Histogram HUD top-left inside viewfinder in PRO mode
+            // Live Histogram HUD top-left inside viewfinder in PRO mode (isolated recomposition scope)
             Box(
                 modifier = Modifier
                     .align(Alignment.TopStart)
@@ -700,13 +741,11 @@ fun CameraScreen(
             ) {
                 OverlayAnimatedVisibility(
                     visible = mode == CameraMode.PRO,
-                    enter = if (animEnabled) fadeIn(tween(180)) + scaleIn(initialScale = 0.92f) else fadeIn(tween(0)),
-                    exit = if (animEnabled) fadeOut(tween(140)) + scaleOut(targetScale = 0.92f) else fadeOut(tween(0))
+                    enter = if (animEnabled) fadeIn(tween(220, easing = HungCamMotion.EmphasizedDecelerate)) + scaleIn(initialScale = 0.92f) else fadeIn(tween(0)),
+                    exit = if (animEnabled) fadeOut(tween(180, easing = HungCamMotion.EmphasizedDecelerate)) + scaleOut(targetScale = 0.92f) else fadeOut(tween(0))
                 ) {
-                    LiveHistogramHud(
-                        bins = telemetry.luminanceBins,
-                        highlightClipPct = telemetry.highlightClipPercent,
-                        shadowClipPct = telemetry.shadowClipPercent,
+                    IsolatedLiveHistogramHud(
+                        viewModel = viewModel,
                         showExposureWarning = proParams.exposureWarningEnabled
                     )
                 }
@@ -875,7 +914,6 @@ fun CameraScreen(
                     viewModel.setTimelapseSpeed(speeds[(idx + 1) % speeds.size])
                 },
                 onOpenFilters = { showFilterStrip = true },
-                onOpenSettings = onOpenSettings,
                 onDismiss = { showQuickGrid = false },
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -1027,20 +1065,20 @@ fun CameraScreen(
                         }
                     }
 
-                    // Right Circular Leica & Filter Wand Toggle
+                    // Right Circular Leica & Filter Wand Toggle (icon highlight only, clean dark surface)
                     val filterInt = remember { MutableInteractionSource() }
                     val filterActive = activeFilter != PhotoFilterPreset.NATURAL || showFilterStrip
-                    val filterBg by animateColorAsState(
-                        targetValue = if (filterActive) accent.copy(alpha = 0.24f) else Color.Black.copy(alpha = 0.56f),
-                        animationSpec = tween(170),
-                        label = "filterBtnBg"
+                    val filterIconTint by animateColorAsState(
+                        targetValue = if (filterActive) accent else PureWhite,
+                        animationSpec = tween(180),
+                        label = "filterBtnTint"
                     )
                     Box(
                         modifier = Modifier
                             .size(40.dp)
                             .springPressScale(filterInt, pressedScale = 0.88f)
                             .clip(CircleShape)
-                            .background(filterBg)
+                            .background(Color.Black.copy(alpha = 0.56f))
                             .border(
                                 width = if (filterActive) 1.dp else 0.75.dp,
                                 color = if (filterActive) accent else HairlineBorder.copy(alpha = 0.8f),
@@ -1058,7 +1096,7 @@ fun CameraScreen(
                         Icon(
                             imageVector = Icons.Default.AutoAwesome,
                             contentDescription = "Bộ lọc Leica & Máy ảnh",
-                            tint = if (filterActive) accent else PureWhite,
+                            tint = filterIconTint,
                             modifier = Modifier.size(19.dp)
                         )
                         if (activeFilter != PhotoFilterPreset.NATURAL) {
@@ -1068,7 +1106,7 @@ fun CameraScreen(
                                     .padding(6.dp)
                                     .size(7.dp)
                                     .clip(CircleShape)
-                                    .background(CrimsonShutter)
+                                    .background(CrimsonLeica)
                             )
                         }
                     }
@@ -1118,13 +1156,12 @@ fun CameraScreen(
                 enter = HungCamMotion.panelEnter(animEnabled) + expandVertically(),
                 exit = HungCamMotion.panelExit(animEnabled) + shrinkVertically()
             ) {
-                ProControlDeck(
+                IsolatedProControlDeck(
+                    viewModel = viewModel,
                     lens = activeLens,
                     params = proParams,
                     captureType = proCaptureType,
                     onSelectCaptureType = viewModel::setProCaptureType,
-                    liveIso = telemetry.activeIso,
-                    liveExposureNs = telemetry.activeExposureNs,
                     onUpdate = viewModel::updateProParams
                 )
             }
@@ -1582,5 +1619,55 @@ private fun OverlayAnimatedVisibility(
         enter = enter,
         exit = exit,
         content = content
+    )
+}
+
+@Composable
+private fun IsolatedElectronicLevelOverlay(viewModel: MainViewModel) {
+    val telemetry by viewModel.telemetry.collectAsStateWithLifecycle()
+    ElectronicLevelOverlay(
+        rollDegrees = telemetry.rollDegrees,
+        isAligned = telemetry.isLevelAligned
+    )
+}
+
+@Composable
+private fun IsolatedFocusPeakingOverlay(viewModel: MainViewModel) {
+    val focusPeaking by viewModel.focusPeakingData.collectAsStateWithLifecycle()
+    FocusPeakingOverlay(data = focusPeaking)
+}
+
+@Composable
+private fun IsolatedLiveHistogramHud(
+    viewModel: MainViewModel,
+    showExposureWarning: Boolean
+) {
+    val telemetry by viewModel.telemetry.collectAsStateWithLifecycle()
+    LiveHistogramHud(
+        bins = telemetry.luminanceBins,
+        highlightClipPct = telemetry.highlightClipPercent,
+        shadowClipPct = telemetry.shadowClipPercent,
+        showExposureWarning = showExposureWarning
+    )
+}
+
+@Composable
+private fun IsolatedProControlDeck(
+    viewModel: MainViewModel,
+    lens: com.example.model.CameraLensInfo?,
+    params: com.example.model.ProCameraParameters,
+    captureType: ProCaptureType,
+    onSelectCaptureType: (ProCaptureType) -> Unit,
+    onUpdate: ((com.example.model.ProCameraParameters) -> com.example.model.ProCameraParameters) -> Unit
+) {
+    val telemetry by viewModel.telemetry.collectAsStateWithLifecycle()
+    ProControlDeck(
+        lens = lens,
+        params = params,
+        captureType = captureType,
+        onSelectCaptureType = onSelectCaptureType,
+        liveIso = telemetry.activeIso,
+        liveExposureNs = telemetry.activeExposureNs,
+        onUpdate = onUpdate
     )
 }
