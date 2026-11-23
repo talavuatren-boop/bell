@@ -81,22 +81,41 @@ class VideoProcessor(private val context: Context) {
         if (config.preserveSourceAspect && displayW > 0 && displayH > 0) {
             val maxDim = max(config.targetResolution.width, config.targetResolution.height)
             val scale = min(1f, maxDim.toFloat() / max(displayW, displayH).toFloat())
-            targetW = (((displayW * scale).roundToInt()) / 16).coerceAtLeast(16) * 16
-            targetH = (((displayH * scale).roundToInt()) / 16).coerceAtLeast(16) * 16
+            targetW = (((displayW * scale).roundToInt()) / 8).coerceAtLeast(16) * 8
+            targetH = (((displayH * scale).roundToInt()) / 8).coerceAtLeast(16) * 8
         } else {
             val rawW = config.targetResolution.width
             val rawH = config.targetResolution.height
-            targetW = ((if (portrait) min(rawW, rawH) else max(rawW, rawH)) / 16) * 16
-            targetH = ((if (portrait) max(rawW, rawH) else min(rawW, rawH)) / 16) * 16
+            targetW = ((if (portrait) min(rawW, rawH) else max(rawW, rawH)) / 8).coerceAtLeast(16) * 8
+            targetH = ((if (portrait) max(rawW, rawH) else min(rawW, rawH)) / 8).coerceAtLeast(16) * 8
         }
 
         val baseFps = config.targetFps.coerceIn(24, 60)
         val outFps = if (interpolateTo60Fps && baseFps < 60) 60 else baseFps
-        val bitrate = when (mode) {
-            AiProcessingMode.FAST -> 10_000_000
-            AiProcessingMode.BALANCED -> 18_000_000
-            AiProcessingMode.QUALITY -> 28_000_000
+        val pixelCount = targetW.toLong() * targetH.toLong()
+        val defaultResBitrate = when {
+            pixelCount >= 7_000_000L -> when (mode) {
+                AiProcessingMode.FAST -> 36_000_000
+                AiProcessingMode.BALANCED -> 50_000_000
+                AiProcessingMode.QUALITY -> 65_000_000
+            }
+            pixelCount >= 1_900_000L && outFps >= 55 -> when (mode) {
+                AiProcessingMode.FAST -> 26_000_000
+                AiProcessingMode.BALANCED -> 36_000_000
+                AiProcessingMode.QUALITY -> 48_000_000
+            }
+            pixelCount >= 1_900_000L -> when (mode) {
+                AiProcessingMode.FAST -> 18_000_000
+                AiProcessingMode.BALANCED -> 26_000_000
+                AiProcessingMode.QUALITY -> 36_000_000
+            }
+            else -> when (mode) {
+                AiProcessingMode.FAST -> 12_000_000
+                AiProcessingMode.BALANCED -> 16_000_000
+                AiProcessingMode.QUALITY -> 22_000_000
+            }
         }
+        val bitrate = config.targetBitrateBps?.coerceIn(8_000_000, 80_000_000) ?: defaultResBitrate
         val colorMatrix = buildColorMatrix(config)
 
         // Fast hardware GPU transcode path when no spatial/temporal bitmap kernels are required
@@ -388,14 +407,17 @@ class VideoProcessor(private val context: Context) {
         val scale = if (preserveSourceAspect || max(rawCodedW, rawCodedH) > maxTargetDim) {
             min(1f, maxTargetDim.toFloat() / max(rawCodedW, rawCodedH).toFloat())
         } else 1f
-        val encW = (((rawCodedW * scale).roundToInt()) / 16).coerceAtLeast(16) * 16
-        val encH = (((rawCodedH * scale).roundToInt()) / 16).coerceAtLeast(16) * 16
+        val encW = (((rawCodedW * scale).roundToInt()) / 8).coerceAtLeast(16) * 8
+        val encH = (((rawCodedH * scale).roundToInt()) / 8).coerceAtLeast(16) * 8
 
         val encFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, encW, encH).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, outFps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+            runCatching {
+                setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
+            }
         }
         val encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
         encoder.configure(encFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
@@ -945,10 +967,10 @@ class VideoProcessor(private val context: Context) {
 
         val rawOutW = targetResolution.width
         val rawOutH = targetResolution.height
-        val outW = if (layout == VideoMergeLayout.SEQUENTIAL && isFirstPortrait) (min(rawOutW, rawOutH) / 16) * 16 else (max(rawOutW, rawOutH) / 16) * 16
-        val outH = if (layout == VideoMergeLayout.SEQUENTIAL && isFirstPortrait) (max(rawOutW, rawOutH) / 16) * 16 else (min(rawOutW, rawOutH) / 16) * 16
+        val outW = if (layout == VideoMergeLayout.SEQUENTIAL && isFirstPortrait) (min(rawOutW, rawOutH) / 8) * 8 else (max(rawOutW, rawOutH) / 8) * 8
+        val outH = if (layout == VideoMergeLayout.SEQUENTIAL && isFirstPortrait) (max(rawOutW, rawOutH) / 8) * 8 else (min(rawOutW, rawOutH) / 8) * 8
         val fps = targetFps.coerceIn(24, 60)
-        val bitrate = if (targetResolution == VideoResolutionPreset.RES_4K) 36_000_000 else 16_000_000
+        val bitrate = if (targetResolution == VideoResolutionPreset.RES_4K) 50_000_000 else 28_000_000
 
         val vFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, outW, outH).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)

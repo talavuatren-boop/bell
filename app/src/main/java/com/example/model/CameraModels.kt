@@ -92,10 +92,16 @@ enum class VideoCodecOption(val label: String, val mimeType: String) {
     HEVC("HEVC", "video/hevc")
 }
 
+enum class HdrMode(val label: String, val badgeLabel: String) {
+    OFF("Tắt", "HDR"),
+    AUTO("Tự động", "HDRᴀ"),
+    ALWAYS("Luôn bật", "HDR+")
+}
+
 enum class VideoBitrateTier(val label: String, val bitsPerSecond: Int) {
-    STANDARD("Standard", 16_000_000),
-    HIGH("High", 35_000_000),
-    PRO_MASTER("Pro 60M", 60_000_000)
+    STANDARD("22M", 22_000_000),
+    HIGH("42M", 42_000_000),
+    PRO_MASTER("65M", 65_000_000)
 }
 
 enum class StabilizationMode(val label: String) {
@@ -336,7 +342,8 @@ data class VideoEditConfig(
     val applyDenoise: Boolean = false,
     val applySharpen: Boolean = false,
     val applyAiColor: Boolean = false,
-    val preserveSourceAspect: Boolean = false
+    val preserveSourceAspect: Boolean = false,
+    val targetBitrateBps: Int? = null
 )
 
 data class AiProcessingProgress(

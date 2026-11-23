@@ -57,6 +57,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.BlurOn
 import androidx.compose.material.icons.filled.Cameraswitch
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FlashAuto
 import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.material.icons.filled.FlashOn
@@ -109,6 +110,7 @@ import com.example.data.MediaAssetEntity
 import com.example.model.AspectRatioMode
 import com.example.model.CameraMode
 import com.example.model.FlashMode
+import com.example.model.HdrMode
 import com.example.model.LivePhotoDuration
 import com.example.model.MediaItemType
 import com.example.model.PhotoFilterPreset
@@ -180,6 +182,7 @@ fun CameraScreen(
     val slowMoOption by viewModel.slowMoOption.collectAsStateWithLifecycle()
     val activeFilter by viewModel.cameraFilter.collectAsStateWithLifecycle()
     val filterIntensity by viewModel.cameraFilterIntensity.collectAsStateWithLifecycle()
+    val isMemeMode by viewModel.isMemeCaptureMode.collectAsStateWithLifecycle()
     val assets by viewModel.activeAssets.collectAsStateWithLifecycle()
 
     var hasCameraPerm by remember {
@@ -795,6 +798,107 @@ fun CameraScreen(
                 }
             }
 
+            // Top-Right Viewfinder Compact Status Pills: HDR+ (Always/Auto) & AI Super-Sharp
+            if (!runtime.isRecording) {
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (mode == CameraMode.PHOTO || mode == CameraMode.PORTRAIT) {
+                        val hdrActive = settings.hdrMode != HdrMode.OFF
+                        Text(
+                            text = settings.hdrMode.badgeLabel,
+                            style = MonoTelemetrySmall.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold),
+                            color = if (hdrActive) accent else PureWhite.copy(alpha = 0.65f),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(Color.Black.copy(alpha = 0.56f))
+                                .border(
+                                    0.75.dp,
+                                    if (hdrActive) accent.copy(alpha = 0.65f) else HairlineBorder,
+                                    RoundedCornerShape(10.dp)
+                                )
+                                .clickable { viewModel.cycleHdrMode() }
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                                .testTag("camera_viewfinder_hdr_pill")
+                        )
+                    }
+                    Text(
+                        text = if (settings.cameraAiSuperSharpEnabled) "AI Nét" else "AI Tắt",
+                        style = MonoTelemetrySmall.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold),
+                        color = if (settings.cameraAiSuperSharpEnabled) accent else PureWhite.copy(alpha = 0.65f),
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color.Black.copy(alpha = 0.56f))
+                            .border(
+                                0.75.dp,
+                                if (settings.cameraAiSuperSharpEnabled) accent.copy(alpha = 0.65f) else HairlineBorder,
+                                RoundedCornerShape(10.dp)
+                            )
+                            .clickable { viewModel.toggleCameraAiSuperSharp() }
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                            .testTag("camera_viewfinder_ai_pill")
+                    )
+                }
+            }
+
+            // Active Meme Mode Prompt Pill (Shoot -> Auto Open Sticker & Meme Editor)
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 42.dp)
+            ) {
+                OverlayAnimatedVisibility(
+                    visible = isMemeMode && !runtime.isRecording,
+                    enter = if (animEnabled) fadeIn(tween(180)) + slideInVertically { -it / 2 } else fadeIn(tween(0)),
+                    exit = if (animEnabled) fadeOut(tween(140)) + slideOutVertically { -it / 2 } else fadeOut(tween(0))
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(Color(0xD9101216))
+                            .border(1.dp, accent, RoundedCornerShape(16.dp))
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                            .testTag("camera_meme_mode_banner"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "MEME • Chụp để ghép Sticker & Chữ",
+                            style = MonoTelemetrySmall.copy(fontSize = 11.sp, fontWeight = FontWeight.Bold),
+                            color = PureWhite
+                        )
+                        if (latestPhoto != null) {
+                            Text(
+                                text = "Ảnh cũ",
+                                style = MonoTelemetrySmall.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold),
+                                color = accent,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(accent.copy(alpha = 0.16f))
+                                    .clickable {
+                                        viewModel.setMemeCaptureMode(false)
+                                        onOpenStickersMeme(latestPhoto)
+                                    }
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Thoát chế độ Meme",
+                            tint = MutedSlate,
+                            modifier = Modifier
+                                .size(16.dp)
+                                .clickable { viewModel.setMemeCaptureMode(false) }
+                                .testTag("camera_meme_mode_close")
+                        )
+                    }
+                }
+            }
+
             // Expandable Translucent 4-Column Quick Grid overlaid cleanly over lower viewfinder (Screenshot 1)
             ModeQuickControlGrid(
                 visible = showQuickGrid,
@@ -809,10 +913,10 @@ fun CameraScreen(
                 isAudioMuted = runtime.isAudioMuted,
                 timelapseSpeed = timelapseSpeed,
                 slowMoOption = slowMoOption,
-                onToggleHdr = {
-                    viewModel.updateSettings { it.copy(hdrEnabled = !it.hdrEnabled) }
-                    viewModel.performHapticTick()
-                },
+                isMemeMode = isMemeMode,
+                onCycleHdr = { viewModel.cycleHdrMode() },
+                onToggleCameraAi = { viewModel.toggleCameraAiSuperSharp() },
+                onToggleMemeMode = { viewModel.setMemeCaptureMode(!isMemeMode) },
                 onCycleLiveDuration = { viewModel.cycleLiveDuration() },
                 onToggleNaturalBoost = {
                     viewModel.updateSettings { it.copy(naturalColorBoostEnabled = !it.naturalColorBoostEnabled) }
@@ -1574,12 +1678,12 @@ fun CameraScreen(
         MoreModesFlagshipSheet(
             visible = showMoreModesPanel,
             currentMode = mode,
-            hasLatestPhoto = latestPhoto != null,
+            isMemeMode = isMemeMode,
             onSelectMode = { viewModel.setCameraMode(it) },
             onOpenAiStudio = onOpenAiStudio,
             onOpenVideoMerge = onOpenVideoMerge,
             onOpenCapabilityReport = onOpenCapabilityReport,
-            onOpenMemeEditor = { latestPhoto?.let(onOpenStickersMeme) },
+            onToggleMemeMode = { viewModel.setMemeCaptureMode(!isMemeMode) },
             onDismiss = { showMoreModesPanel = false }
         )
     }

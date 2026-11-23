@@ -12,6 +12,7 @@ import com.example.model.AiProcessingMode
 import com.example.model.AspectRatioMode
 import com.example.model.CameraMode
 import com.example.model.GridType
+import com.example.model.HdrMode
 import com.example.model.LivePhotoDuration
 import com.example.model.PhotoFormat
 import com.example.model.PhotoResolutionTier
@@ -28,14 +29,15 @@ data class HungCamSettings(
     // Camera settings
     val defaultLensFacingBack: Boolean = true,
     val defaultCameraMode: CameraMode = CameraMode.PHOTO,
-    val photoResolutionTier: PhotoResolutionTier = PhotoResolutionTier.STANDARD,
+    val photoResolutionTier: PhotoResolutionTier = PhotoResolutionTier.MAX,
     val photoFormat: PhotoFormat = PhotoFormat.JPEG,
-    val hdrEnabled: Boolean = true,
+    val hdrMode: HdrMode = HdrMode.ALWAYS,
+    val cameraAiSuperSharpEnabled: Boolean = true,
     val videoResolution: VideoResolutionPreset = VideoResolutionPreset.RES_1080P,
     val videoFps: Int = 30,
     val videoBitrateTier: VideoBitrateTier = VideoBitrateTier.HIGH,
     val videoCodec: VideoCodecOption = VideoCodecOption.H264,
-    val stabilizationMode: StabilizationMode = StabilizationMode.HYBRID,
+    val stabilizationMode: StabilizationMode = StabilizationMode.OIS,
     val aspectRatio: AspectRatioMode = AspectRatioMode.RATIO_4_3,
     val gridType: GridType = GridType.RULE_OF_THIRDS,
     val electronicLevelEnabled: Boolean = true,
@@ -60,7 +62,9 @@ data class HungCamSettings(
     val animationsEnabled: Boolean = true,
     // Privacy settings
     val locationMetadataEnabled: Boolean = false
-)
+) {
+    val hdrEnabled: Boolean get() = hdrMode != HdrMode.OFF
+}
 
 class SettingsDataStore(private val context: Context) {
 
@@ -70,6 +74,8 @@ class SettingsDataStore(private val context: Context) {
         val PHOTO_RES_TIER = stringPreferencesKey("photo_res_tier")
         val PHOTO_FORMAT = stringPreferencesKey("photo_format")
         val HDR_ENABLED = booleanPreferencesKey("hdr_enabled")
+        val HDR_MODE = stringPreferencesKey("hdr_mode")
+        val CAMERA_AI_SUPER_SHARP = booleanPreferencesKey("camera_ai_super_sharp")
         val VIDEO_RES = stringPreferencesKey("video_res")
         val VIDEO_FPS = stringPreferencesKey("video_fps")
         val VIDEO_BITRATE = stringPreferencesKey("video_bitrate")
@@ -97,18 +103,21 @@ class SettingsDataStore(private val context: Context) {
         val LOCATION_META = booleanPreferencesKey("location_meta")
     }
 
-    val settingsFlow: Flow<HungCamSettings> = context.hungCamDataStore.data.map { prefs ->
-        HungCamSettings(
+    private fun readSettings(prefs: Preferences): HungCamSettings {
+        val legacyHdr = prefs[Keys.HDR_ENABLED]
+        val defaultHdr = if (legacyHdr == false) HdrMode.OFF else HdrMode.ALWAYS
+        return HungCamSettings(
             defaultLensFacingBack = prefs[Keys.DEFAULT_BACK] ?: true,
             defaultCameraMode = enumValueOrDefault(prefs[Keys.DEFAULT_MODE], CameraMode.PHOTO),
-            photoResolutionTier = enumValueOrDefault(prefs[Keys.PHOTO_RES_TIER], PhotoResolutionTier.STANDARD),
+            photoResolutionTier = enumValueOrDefault(prefs[Keys.PHOTO_RES_TIER], PhotoResolutionTier.MAX),
             photoFormat = enumValueOrDefault(prefs[Keys.PHOTO_FORMAT], PhotoFormat.JPEG),
-            hdrEnabled = prefs[Keys.HDR_ENABLED] ?: true,
+            hdrMode = enumValueOrDefault(prefs[Keys.HDR_MODE], defaultHdr),
+            cameraAiSuperSharpEnabled = prefs[Keys.CAMERA_AI_SUPER_SHARP] ?: true,
             videoResolution = enumValueOrDefault(prefs[Keys.VIDEO_RES], VideoResolutionPreset.RES_1080P),
             videoFps = prefs[Keys.VIDEO_FPS]?.toIntOrNull() ?: 30,
             videoBitrateTier = enumValueOrDefault(prefs[Keys.VIDEO_BITRATE], VideoBitrateTier.HIGH),
             videoCodec = enumValueOrDefault(prefs[Keys.VIDEO_CODEC], VideoCodecOption.H264),
-            stabilizationMode = enumValueOrDefault(prefs[Keys.STAB_MODE], StabilizationMode.HYBRID),
+            stabilizationMode = enumValueOrDefault(prefs[Keys.STAB_MODE], StabilizationMode.OIS),
             aspectRatio = enumValueOrDefault(prefs[Keys.ASPECT_RATIO], AspectRatioMode.RATIO_4_3),
             gridType = enumValueOrDefault(prefs[Keys.GRID_TYPE], GridType.RULE_OF_THIRDS),
             electronicLevelEnabled = prefs[Keys.LEVEL_ENABLED] ?: true,
@@ -132,46 +141,19 @@ class SettingsDataStore(private val context: Context) {
         )
     }
 
+    val settingsFlow: Flow<HungCamSettings> = context.hungCamDataStore.data.map(::readSettings)
+
     suspend fun update(transform: (HungCamSettings) -> HungCamSettings) {
         context.hungCamDataStore.edit { prefs ->
-            val current = HungCamSettings(
-                defaultLensFacingBack = prefs[Keys.DEFAULT_BACK] ?: true,
-                defaultCameraMode = enumValueOrDefault(prefs[Keys.DEFAULT_MODE], CameraMode.PHOTO),
-                photoResolutionTier = enumValueOrDefault(prefs[Keys.PHOTO_RES_TIER], PhotoResolutionTier.STANDARD),
-                photoFormat = enumValueOrDefault(prefs[Keys.PHOTO_FORMAT], PhotoFormat.JPEG),
-                hdrEnabled = prefs[Keys.HDR_ENABLED] ?: true,
-                videoResolution = enumValueOrDefault(prefs[Keys.VIDEO_RES], VideoResolutionPreset.RES_1080P),
-                videoFps = prefs[Keys.VIDEO_FPS]?.toIntOrNull() ?: 30,
-                videoBitrateTier = enumValueOrDefault(prefs[Keys.VIDEO_BITRATE], VideoBitrateTier.HIGH),
-                videoCodec = enumValueOrDefault(prefs[Keys.VIDEO_CODEC], VideoCodecOption.H264),
-                stabilizationMode = enumValueOrDefault(prefs[Keys.STAB_MODE], StabilizationMode.HYBRID),
-                aspectRatio = enumValueOrDefault(prefs[Keys.ASPECT_RATIO], AspectRatioMode.RATIO_4_3),
-                gridType = enumValueOrDefault(prefs[Keys.GRID_TYPE], GridType.RULE_OF_THIRDS),
-                electronicLevelEnabled = prefs[Keys.LEVEL_ENABLED] ?: true,
-                volumeShutterEnabled = prefs[Keys.VOLUME_SHUTTER] ?: true,
-                naturalColorBoostEnabled = prefs[Keys.NATURAL_COLOR_BOOST] ?: true,
-                cameraWatermarkEnabled = prefs[Keys.CAMERA_WATERMARK] ?: false,
-                livePhotoDefaultDuration = enumValueOrDefault(prefs[Keys.LIVE_DURATION], LivePhotoDuration.THREE_SEC),
-                livePhotoSoundEnabled = prefs[Keys.LIVE_SOUND] ?: true,
-                livePhotoAutoLoopViewer = prefs[Keys.LIVE_LOOP] ?: true,
-                livePhotoHighBitrate = prefs[Keys.LIVE_HIGH_BITRATE] ?: true,
-                aiDefaultMode = enumValueOrDefault(prefs[Keys.AI_MODE], AiProcessingMode.BALANCED),
-                aiAutoDenoise = prefs[Keys.AI_DENOISE] ?: true,
-                aiAutoSharpen = prefs[Keys.AI_SHARPEN] ?: true,
-                aiAutoStabilize = prefs[Keys.AI_STABILIZE] ?: true,
-                aiLocalProcessingOnly = prefs[Keys.AI_LOCAL_ONLY] ?: true,
-                darkModeEnabled = prefs[Keys.DARK_MODE] ?: true,
-                accentColorPreset = enumValueOrDefault(prefs[Keys.ACCENT_PRESET], AccentColorPreset.CRIMSON_PRO),
-                hapticFeedbackEnabled = prefs[Keys.HAPTICS] ?: true,
-                animationsEnabled = prefs[Keys.ANIMATIONS] ?: true,
-                locationMetadataEnabled = prefs[Keys.LOCATION_META] ?: false
-            )
+            val current = readSettings(prefs)
             val next = transform(current)
             prefs[Keys.DEFAULT_BACK] = next.defaultLensFacingBack
             prefs[Keys.DEFAULT_MODE] = next.defaultCameraMode.name
             prefs[Keys.PHOTO_RES_TIER] = next.photoResolutionTier.name
             prefs[Keys.PHOTO_FORMAT] = next.photoFormat.name
+            prefs[Keys.HDR_MODE] = next.hdrMode.name
             prefs[Keys.HDR_ENABLED] = next.hdrEnabled
+            prefs[Keys.CAMERA_AI_SUPER_SHARP] = next.cameraAiSuperSharpEnabled
             prefs[Keys.VIDEO_RES] = next.videoResolution.name
             prefs[Keys.VIDEO_FPS] = next.videoFps.toString()
             prefs[Keys.VIDEO_BITRATE] = next.videoBitrateTier.name

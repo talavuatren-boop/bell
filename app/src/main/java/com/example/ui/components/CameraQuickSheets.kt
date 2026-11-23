@@ -69,6 +69,7 @@ import com.example.data.HungCamSettings
 import com.example.model.CameraLensInfo
 import com.example.model.CameraMode
 import com.example.model.GridType
+import com.example.model.HdrMode
 import com.example.model.LivePhotoDuration
 import com.example.model.PhotoFilterPreset
 import com.example.model.PhotoResolutionTier
@@ -110,7 +111,10 @@ fun ModeQuickControlGrid(
     isAudioMuted: Boolean,
     timelapseSpeed: TimelapseSpeed,
     slowMoOption: SlowMoOption?,
-    onToggleHdr: () -> Unit,
+    isMemeMode: Boolean,
+    onCycleHdr: () -> Unit,
+    onToggleCameraAi: () -> Unit,
+    onToggleMemeMode: () -> Unit,
     onCycleLiveDuration: () -> Unit,
     onToggleNaturalBoost: () -> Unit,
     onCycleAspectRatio: () -> Unit,
@@ -140,16 +144,23 @@ fun ModeQuickControlGrid(
     val items: List<QuickGridAction> = remember(
         mode, settings, activeLens, liveDuration, selfTimer,
         proParams, proCaptureType, activeFilter, isAudioMuted,
-        timelapseSpeed, slowMoOption
+        timelapseSpeed, slowMoOption, isMemeMode
     ) {
         when (mode) {
             CameraMode.PHOTO -> listOf(
                 QuickGridAction(
                     id = "hdr",
-                    label = "HDR",
-                    badgeText = if (settings.hdrEnabled) "HDRᴀ" else "HDR",
-                    isActive = settings.hdrEnabled,
-                    onClick = onToggleHdr
+                    label = "HDR ${settings.hdrMode.label}",
+                    badgeText = settings.hdrMode.badgeLabel,
+                    isActive = settings.hdrMode != HdrMode.OFF,
+                    onClick = onCycleHdr
+                ),
+                QuickGridAction(
+                    id = "camera_ai",
+                    label = "AI Siêu nét",
+                    badgeText = "AI",
+                    isActive = settings.cameraAiSuperSharpEnabled,
+                    onClick = onToggleCameraAi
                 ),
                 QuickGridAction(
                     id = "live",
@@ -215,6 +226,16 @@ fun ModeQuickControlGrid(
                     onClick = onToggleWatermark
                 ),
                 QuickGridAction(
+                    id = "meme_mode",
+                    label = if (isMemeMode) "Meme: BẬT" else "Chụp Meme",
+                    icon = Icons.Outlined.EmojiEmotions,
+                    isActive = isMemeMode,
+                    onClick = {
+                        onDismiss()
+                        onToggleMemeMode()
+                    }
+                ),
+                QuickGridAction(
                     id = "filters",
                     label = if (activeFilter == PhotoFilterPreset.NATURAL) "Bộ lọc" else activeFilter.label,
                     icon = Icons.Outlined.FilterVintage,
@@ -227,6 +248,13 @@ fun ModeQuickControlGrid(
             )
 
             CameraMode.VIDEO -> listOf(
+                QuickGridAction(
+                    id = "camera_ai",
+                    label = "AI Siêu nét",
+                    badgeText = "AI",
+                    isActive = settings.cameraAiSuperSharpEnabled,
+                    onClick = onToggleCameraAi
+                ),
                 QuickGridAction(
                     id = "video_res",
                     label = "Độ phân giải",
@@ -291,10 +319,17 @@ fun ModeQuickControlGrid(
             CameraMode.PORTRAIT -> listOf(
                 QuickGridAction(
                     id = "hdr",
-                    label = "HDR",
-                    badgeText = if (settings.hdrEnabled) "HDRᴀ" else "HDR",
-                    isActive = settings.hdrEnabled,
-                    onClick = onToggleHdr
+                    label = "HDR ${settings.hdrMode.label}",
+                    badgeText = settings.hdrMode.badgeLabel,
+                    isActive = settings.hdrMode != HdrMode.OFF,
+                    onClick = onCycleHdr
+                ),
+                QuickGridAction(
+                    id = "camera_ai",
+                    label = "AI Siêu nét",
+                    badgeText = "AI",
+                    isActive = settings.cameraAiSuperSharpEnabled,
+                    onClick = onToggleCameraAi
                 ),
                 QuickGridAction(
                     id = "natural_plus",
@@ -339,6 +374,16 @@ fun ModeQuickControlGrid(
                     onClick = onToggleLevel
                 ),
                 QuickGridAction(
+                    id = "meme_mode",
+                    label = if (isMemeMode) "Meme: BẬT" else "Chụp Meme",
+                    icon = Icons.Outlined.EmojiEmotions,
+                    isActive = isMemeMode,
+                    onClick = {
+                        onDismiss()
+                        onToggleMemeMode()
+                    }
+                ),
+                QuickGridAction(
                     id = "filters",
                     label = if (activeFilter == PhotoFilterPreset.NATURAL) "Bộ lọc" else activeFilter.label,
                     icon = Icons.Outlined.FilterVintage,
@@ -357,6 +402,13 @@ fun ModeQuickControlGrid(
                     icon = if (proCaptureType == ProCaptureType.PHOTO) Icons.Outlined.CameraEnhance else Icons.Outlined.Videocam,
                     isActive = true,
                     onClick = onCycleProCaptureType
+                ),
+                QuickGridAction(
+                    id = "camera_ai",
+                    label = "AI Siêu nét",
+                    badgeText = "AI",
+                    isActive = settings.cameraAiSuperSharpEnabled,
+                    onClick = onToggleCameraAi
                 ),
                 QuickGridAction(
                     id = "raw",
@@ -579,12 +631,12 @@ private data class MoreDrawerItem(
 fun MoreModesFlagshipSheet(
     visible: Boolean,
     currentMode: CameraMode,
-    hasLatestPhoto: Boolean,
+    isMemeMode: Boolean,
     onSelectMode: (CameraMode) -> Unit,
     onOpenAiStudio: () -> Unit,
     onOpenVideoMerge: () -> Unit,
     onOpenCapabilityReport: () -> Unit,
-    onOpenMemeEditor: () -> Unit,
+    onToggleMemeMode: () -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -597,7 +649,7 @@ fun MoreModesFlagshipSheet(
         exit = HungCamMotion.sheetExit(animEnabled),
         modifier = modifier
     ) {
-        val entries = remember(currentMode, hasLatestPhoto) {
+        val entries = remember(currentMode, isMemeMode) {
             buildList {
                 add(
                     MoreDrawerItem(
@@ -607,6 +659,16 @@ fun MoreModesFlagshipSheet(
                         selected = currentMode == CameraMode.PRO,
                         testTag = "more_mode_pro",
                         onClick = { onSelectMode(CameraMode.PRO); onDismiss() }
+                    )
+                )
+                add(
+                    MoreDrawerItem(
+                        id = "meme",
+                        title = if (isMemeMode) "Meme (Đang bật)" else "Chụp Meme",
+                        icon = Icons.Outlined.EmojiEmotions,
+                        selected = isMemeMode,
+                        testTag = "more_mode_meme",
+                        onClick = { onToggleMemeMode(); onDismiss() }
                     )
                 )
                 add(
@@ -659,18 +721,6 @@ fun MoreModesFlagshipSheet(
                         onClick = { onDismiss(); onOpenCapabilityReport() }
                     )
                 )
-                if (hasLatestPhoto) {
-                    add(
-                        MoreDrawerItem(
-                            id = "meme",
-                            title = "Sticker & Meme",
-                            icon = Icons.Outlined.EmojiEmotions,
-                            selected = false,
-                            testTag = "more_mode_meme",
-                            onClick = { onDismiss(); onOpenMemeEditor() }
-                        )
-                    )
-                }
             }
         }
 

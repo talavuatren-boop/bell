@@ -608,4 +608,29 @@ class HungCamCoreTest {
         assertEquals(32, watermarked.width)
         assertTrue("Expected watermark bar added below photo", watermarked.height > 24)
     }
+
+    @Test
+    fun `computational hdr lifts dark shadows and camera ai super sharp boosts edge acutance`() {
+        val bmp = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
+        for (y in 0 until 32) {
+            for (x in 0 until 32) {
+                val c = if (x < 16) android.graphics.Color.rgb(28, 30, 34) else android.graphics.Color.rgb(210, 214, 218)
+                bmp.setPixel(x, y, c)
+            }
+        }
+        val hdr = ImageProcessor.applyComputationalHdr(bmp, strength = 0.78f)
+        assertEquals(32, hdr.width)
+        assertEquals(32, hdr.height)
+        val shadowBefore = android.graphics.Color.red(bmp.getPixel(4, 16))
+        val shadowAfter = android.graphics.Color.red(hdr.getPixel(4, 16))
+        assertTrue("Expected computational HDR to lift shadow ($shadowBefore -> $shadowAfter)", shadowAfter > shadowBefore)
+
+        val sharpened = ImageProcessor.applyCameraAiSuperSharp(hdr, strength = 0.85f)
+        assertEquals(32, sharpened.width)
+        assertEquals(32, sharpened.height)
+        val darkEdge = android.graphics.Color.red(sharpened.getPixel(15, 16))
+        val brightEdge = android.graphics.Color.red(sharpened.getPixel(16, 16))
+        assertTrue("Expected clear edge contrast preserved after super-sharp", brightEdge - darkEdge > 150)
+    }
 }
+

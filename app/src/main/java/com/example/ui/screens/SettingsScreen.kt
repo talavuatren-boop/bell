@@ -55,6 +55,7 @@ import com.example.model.AiProcessingMode
 import com.example.model.AspectRatioMode
 import com.example.model.CameraMode
 import com.example.model.GridType
+import com.example.model.HdrMode
 import com.example.model.LivePhotoDuration
 import com.example.model.PhotoFormat
 import com.example.model.PhotoResolutionTier
@@ -245,6 +246,19 @@ fun SettingsScreen(
                 subtitle = "Nhấn nút Tăng/Giảm âm lượng để bấm máy nhanh",
                 checked = settings.volumeShutterEnabled,
                 onCheckedChange = { v -> viewModel.updateSettings { it.copy(volumeShutterEnabled = v) } }
+            )
+            SettingsChipGroup(
+                label = "Chế độ HDR",
+                items = HdrMode.entries,
+                selected = settings.hdrMode,
+                itemLabel = { it.label },
+                onSelect = { h -> viewModel.updateSettings { it.copy(hdrMode = h) } }
+            )
+            SettingsToggleRow(
+                title = "Camera AI tự làm nét siêu nét",
+                subtitle = "Tăng cường độ sắc nét vi mô & bảo toàn chi tiết cạnh ảnh không quầng sáng",
+                checked = settings.cameraAiSuperSharpEnabled,
+                onCheckedChange = { v -> viewModel.updateSettings { it.copy(cameraAiSuperSharpEnabled = v) } }
             )
             SettingsToggleRow(
                 title = "Màu gốc rực rỡ tự nhiên (Natural+)",

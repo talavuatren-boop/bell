@@ -90,6 +90,7 @@ fun HungCamApp(
     val editorNotice by viewModel.editorExportNotice.collectAsStateWithLifecycle()
     val activeAssets by viewModel.activeAssets.collectAsStateWithLifecycle()
     val deletedAssets by viewModel.deletedAssets.collectAsStateWithLifecycle()
+    val capturedMemeAsset by viewModel.capturedMemeAsset.collectAsStateWithLifecycle()
 
     var currentTab by remember { mutableStateOf(MainNavDestination.CAMERA) }
     var subScreen by remember { mutableStateOf<SubScreen>(SubScreen.None) }
@@ -97,6 +98,13 @@ fun HungCamApp(
 
     LaunchedEffect(currentTab, subScreen) {
         onDestinationChanged(if (subScreen == SubScreen.None) currentTab else MainNavDestination.GALLERY)
+    }
+
+    LaunchedEffect(capturedMemeAsset) {
+        capturedMemeAsset?.let { asset ->
+            subScreen = SubScreen.PhotoEdit(asset, openStickersMeme = true)
+            viewModel.consumeCapturedMemeAsset()
+        }
     }
 
     LaunchedEffect(editorNotice) {

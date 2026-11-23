@@ -1008,4 +1008,161 @@ object ImageProcessor {
         }
         return Bitmap.createBitmap(cur, w, h, Bitmap.Config.ARGB_8888)
     }
+
+    /**
+     * Computational HDR tone-mapping pass (row-streamed, zero large intermediate buffers).
+     * Lifts dark shadow detail and recovers bright highlight headroom while preserving
+     * skin-safe saturation and true contrast.
+     */
+    fun applyComputationalHdr(
+        source: Bitmap,
+        strength: Float = 0.72f
+    ): Bitmap {
+        val s = strength.coerceIn(0f, 1f)
+        val w = source.width
+        val h = source.height
+        if (w <= 0 || h <= 0 || s <= 0.02f) return ensureMutableBitmap(source)
+
+        val outBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val srcRow = IntArray(w)
+        val outRow = IntArray(w)
+
+        // Precompute 256-entry HDR luminance lift/compress LUT for crisp native speed
+        val lumaGainLut = FloatArray(256) { i ->
+            val y = i / 255f
+            // Shadow lift peaking around dark-midtones (y ~ 0.18), zero at pitch black
+            val shadowMask = ((1f - y) * (1f - y) * (y * 5.2f).coerceIn(0f, 1f))
+            val shadowLift = shadowMask * 0.24f * s
+            // Highlight roll-off compression starting above y > 0.62
+            val hiMask = ((y - 0.62f) / 0.38f).coerceIn(0f, 1f)
+            val hiCompress = (hiMask * hiMask) * 0.14f * s
+            // Subtle micro S-contrast around midtones
+            val midCurve = (applySoftSCurve(y) - y) * 0.32f * s
+            val mapped = (y + shadowLift - hiCompress + midCurve).coerceIn(0.0001f, 1f)
+            if (y > 0.004f) (mapped / y).coerceIn(0.75f, 1.85f) else 1f
+        }
+
+        for (y in 0 until h) {
+            source.getPixels(srcRow, 0, w, 0, y, w, 1)
+            for (x in 0 until w) {
+                val p = srcRow[x]
+                val a = (p ushr 24) and 0xFF
+                val r = (p shr 16) and 0xFF
+                val g = (p shr 8) and 0xFF
+                val b = p and 0xFF
+
+                val lum = (0.299f * r + 0.587f * g + 0.114f * b).roundToInt().coerceIn(0, 255)
+                val gain = lumaGainLut[lum]
+
+                // Apply luminance gain while gently compensating saturation in lifted shadows/highlights
+                val nr = (r * gain)
+                val ng = (g * gain)
+                val nb = (b * gain)
+                val newLum = 0.299f * nr + 0.587f * ng + 0.114f * nb
+                val chromaBoost = if (gain > 1.04f || gain < 0.94f) 1f + 0.08f * s else 1f
+
+                val rr = (newLum + (nr - newLum) * chromaBoost).roundToInt().coerceIn(0, 255)
+                val gg = (newLum + (ng - newLum) * chromaBoost).roundToInt().coerceIn(0, 255)
+                val bb = (newLum + (nb - newLum) * chromaBoost).roundToInt().coerceIn(0, 255)
+                outRow[x] = (a shl 24) or (rr shl 16) or (gg shl 8) or bb
+            }
+            outBitmap.setPixels(outRow, 0, w, 0, y, w, 1)
+        }
+        return outBitmap
+    }
+
+    /**
+     * Camera AI Super-Sharp clarity pass (3-row sliding window, O(width) extra RAM even at 50MP).
+     * Enhances luminance edges and micro-textures with noise-gate suppression on flat surfaces
+     * and highlight/shadow halo clamping so foliage, eyes, text, and fabrics look crisp.
+     */
+    fun applyCameraAiSuperSharp(
+        source: Bitmap,
+        strength: Float = 0.85f
+    ): Bitmap {
+        val s = strength.coerceIn(0f, 1.2f)
+        val w = source.width
+        val h = source.height
+        if (w < 3 || h < 3 || s <= 0.02f) return ensureMutableBitmap(source)
+
+        val outBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        var prevRow = IntArray(w)
+        var curRow = IntArray(w)
+        var nextRow = IntArray(w)
+        val outRow = IntArray(w)
+
+        source.getPixels(prevRow, 0, w, 0, 0, w, 1)
+        source.getPixels(curRow, 0, w, 0, 1, w, 1)
+        // Copy top border row unchanged
+        outBitmap.setPixels(prevRow, 0, w, 0, 0, w, 1)
+
+        val sharpGain = 0.98f * s
+        val maxOvershoot = (34f * s).coerceIn(8f, 38f)
+
+        fun lumaOf(px: Int): Float {
+            val r = (px shr 16) and 0xFF
+            val g = (px shr 8) and 0xFF
+            val b = px and 0xFF
+            return 0.299f * r + 0.587f * g + 0.114f * b
+        }
+
+        for (y in 1 until h - 1) {
+            source.getPixels(nextRow, 0, w, 0, y + 1, w, 1)
+            outRow[0] = curRow[0]
+            outRow[w - 1] = curRow[w - 1]
+
+            for (x in 1 until w - 1) {
+                val cp = curRow[x]
+                val a = (cp ushr 24) and 0xFF
+                val cr = (cp shr 16) and 0xFF
+                val cg = (cp shr 8) and 0xFF
+                val cb = cp and 0xFF
+                val cy = 0.299f * cr + 0.587f * cg + 0.114f * cb
+
+                // 3x3 Gaussian-weighted surround in luma domain (weights: cardinal=2, diagonal=1, sum=12)
+                val avgY = (
+                    (lumaOf(prevRow[x]) + lumaOf(nextRow[x]) + lumaOf(curRow[x - 1]) + lumaOf(curRow[x + 1])) * 2f +
+                        lumaOf(prevRow[x - 1]) + lumaOf(prevRow[x + 1]) + lumaOf(nextRow[x - 1]) + lumaOf(nextRow[x + 1])
+                    ) / 12f
+
+                val rawDelta = cy - avgY
+                val absDelta = abs(rawDelta)
+
+                // Soft noise gate: suppress noise amplification on uniform areas, boost real texture/edges
+                val gate = when {
+                    absDelta < 2.8f -> 0.18f
+                    absDelta < 6.5f -> 0.18f + ((absDelta - 2.8f) / 3.7f) * 0.82f
+                    else -> 1.0f
+                }
+
+                // Subtle local micro-contrast pop + clipped halo-free overshoot protection
+                val edgeScale = 1f - ((absDelta - 45f) / 90f).coerceIn(0f, 0.35f)
+                val sharpDelta = (rawDelta * sharpGain * gate * edgeScale).coerceIn(-maxOvershoot, maxOvershoot)
+
+                // Taper extreme near-black / near-white boost to prevent clipping halos
+                val headroomFade = when {
+                    cy > 235f -> ((255f - cy) / 20f).coerceIn(0f, 1f)
+                    cy < 18f -> (cy / 18f).coerceIn(0f, 1f)
+                    else -> 1f
+                }
+                val d = (sharpDelta * headroomFade).roundToInt()
+
+                val nr = (cr + d).coerceIn(0, 255)
+                val ng = (cg + d).coerceIn(0, 255)
+                val nb = (cb + d).coerceIn(0, 255)
+                outRow[x] = (a shl 24) or (nr shl 16) or (ng shl 8) or nb
+            }
+            outBitmap.setPixels(outRow, 0, w, 0, y, w, 1)
+
+            // Rotate row references cleanly with zero extra allocations
+            val reuse = prevRow
+            prevRow = curRow
+            curRow = nextRow
+            nextRow = reuse
+        }
+
+        // Copy bottom border row
+        outBitmap.setPixels(curRow, 0, w, 0, h - 1, w, 1)
+        return outBitmap
+    }
 }

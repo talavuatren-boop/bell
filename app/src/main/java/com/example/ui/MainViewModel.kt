@@ -31,6 +31,7 @@ import com.example.model.DeviceCapabilityReport
 import com.example.model.FlashMode
 import com.example.model.GalleryCategory
 import com.example.model.GridType
+import com.example.model.HdrMode
 import com.example.model.LivePhotoDuration
 import com.example.model.LiveTelemetryState
 import com.example.model.MediaItemType
@@ -101,6 +102,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val cameraRuntime: StateFlow<CameraRuntimeState> = cameraEngine.runtimeState
     val focusPeakingData: StateFlow<FocusPeakingOverlayData?> = cameraEngine.focusPeaking
+    val capturedMemeAsset: StateFlow<MediaAssetEntity?> = cameraEngine.capturedMemeAsset
 
     private val _capabilities = MutableStateFlow<DeviceCapabilityReport?>(null)
     val capabilities: StateFlow<DeviceCapabilityReport?> = _capabilities.asStateFlow()
@@ -143,6 +145,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _cameraFilterIntensity = MutableStateFlow(0.88f)
     val cameraFilterIntensity: StateFlow<Float> = _cameraFilterIntensity.asStateFlow()
+
+    private val _isMemeCaptureMode = MutableStateFlow(false)
+    val isMemeCaptureMode: StateFlow<Boolean> = _isMemeCaptureMode.asStateFlow()
 
     private val _galleryCategory = MutableStateFlow(GalleryCategory.ALL)
     val galleryCategory: StateFlow<GalleryCategory> = _galleryCategory.asStateFlow()
@@ -281,6 +286,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setCameraMode(mode: CameraMode) {
         if (cameraRuntime.value.isRecording) return
         _cameraMode.value = mode
+        if (mode == CameraMode.VIDEO || mode == CameraMode.SLOW_MOTION || mode == CameraMode.TIMELAPSE) {
+            _isMemeCaptureMode.value = false
+        }
         performHapticTick()
         syncSession()
     }
@@ -289,11 +297,44 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (cameraRuntime.value.isRecording) return
         if (_proCaptureType.value == type) return
         _proCaptureType.value = type
-        if (type == ProCaptureType.VIDEO && (_flashMode.value == FlashMode.AUTO || _flashMode.value == FlashMode.ON)) {
-            _flashMode.value = FlashMode.OFF
+        if (type == ProCaptureType.VIDEO) {
+            _isMemeCaptureMode.value = false
+            if (_flashMode.value == FlashMode.AUTO || _flashMode.value == FlashMode.ON) {
+                _flashMode.value = FlashMode.OFF
+            }
         }
         performHapticTick()
         syncSession()
+    }
+
+    fun setMemeCaptureMode(enabled: Boolean) {
+        if (cameraRuntime.value.isRecording) return
+        if (enabled && isVideoCaptureSelected()) {
+            _cameraMode.value = CameraMode.PHOTO
+            syncSession()
+        }
+        _isMemeCaptureMode.value = enabled
+        performHapticTick()
+    }
+
+    fun consumeCapturedMemeAsset() {
+        cameraEngine.consumeCapturedMemeAsset()
+        _isMemeCaptureMode.value = false
+    }
+
+    fun cycleHdrMode() {
+        val order = listOf(HdrMode.ALWAYS, HdrMode.AUTO, HdrMode.OFF)
+        val cur = settings.value.hdrMode
+        val next = order[(order.indexOf(cur) + 1) % order.size]
+        viewModelScope.launch { settingsStore.update { it.copy(hdrMode = next) } }
+        performHapticTick()
+    }
+
+    fun toggleCameraAiSuperSharp() {
+        viewModelScope.launch {
+            settingsStore.update { it.copy(cameraAiSuperSharpEnabled = !it.cameraAiSuperSharpEnabled) }
+        }
+        performHapticTick()
     }
 
     fun setPortraitBokehStrength(strength: Float) {
@@ -410,6 +451,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         val timerSecs = _selfTimer.value.seconds
+        val memeShot = _isMemeCaptureMode.value
         if (timerSecs > 0) {
             timerJob = viewModelScope.launch {
                 for (sec in timerSecs downTo 1) {
@@ -419,11 +461,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 _countdownRemaining.value = 0
                 performHapticTick(heavy = true)
-                cameraEngine.capturePhoto()
+                cameraEngine.capturePhoto(isMemeShot = memeShot)
             }
         } else {
             performHapticTick(heavy = true)
-            cameraEngine.capturePhoto()
+            cameraEngine.capturePhoto(isMemeShot = memeShot)
         }
     }
 

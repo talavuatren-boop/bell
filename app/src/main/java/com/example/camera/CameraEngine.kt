@@ -36,11 +36,13 @@ import android.util.SparseIntArray
 import android.view.Surface
 import android.view.TextureView
 import com.example.data.HungCamSettings
+import com.example.data.MediaAssetEntity
 import com.example.data.MediaStoreRepository
 import com.example.model.AiProcessingMode
 import com.example.model.CameraLensInfo
 import com.example.model.CameraMode
 import com.example.model.FlashMode
+import com.example.model.HdrMode
 import com.example.model.LivePhotoDuration
 import com.example.model.PhotoFilterPreset
 import com.example.model.PhotoFormat
@@ -190,6 +192,13 @@ class CameraEngine(
 
     private val _liveMeteringInfo = MutableStateFlow<Pair<Int?, Long?>>(null to null)
     val liveMeteringInfo: StateFlow<Pair<Int?, Long?>> = _liveMeteringInfo.asStateFlow()
+
+    private val _capturedMemeAsset = MutableStateFlow<MediaAssetEntity?>(null)
+    val capturedMemeAsset: StateFlow<MediaAssetEntity?> = _capturedMemeAsset.asStateFlow()
+
+    fun consumeCapturedMemeAsset() {
+        _capturedMemeAsset.value = null
+    }
 
     fun attachTextureView(tv: TextureView, rotationDegrees: Int) {
         textureView = tv
@@ -576,21 +585,31 @@ class CameraEngine(
             lens.hardwareLevelLabel != "LEGACY"
 
         val chosenStillSize = when {
-            (useMinimalTwoSurfaceFallback || capLiveStillTo1080p) && ratioMatchedStillSizes.isNotEmpty() -> {
-                ratioMatchedStillSizes.firstOrNull { it.width <= 1920 && it.height <= 1440 }
+            useMinimalTwoSurfaceFallback && ratioMatchedStillSizes.isNotEmpty() -> {
+                ratioMatchedStillSizes.firstOrNull { it.width <= 2560 && it.height <= 1920 }
+                    ?: ratioMatchedStillSizes.firstOrNull { it.width <= 1920 && it.height <= 1440 }
+                    ?: ratioMatchedStillSizes.last()
+            }
+            capLiveStillTo1080p && ratioMatchedStillSizes.isNotEmpty() -> {
+                ratioMatchedStillSizes.firstOrNull { it.width <= 2560 && it.height <= 1920 }
+                    ?: ratioMatchedStillSizes.firstOrNull { it.width <= 1920 && it.height <= 1440 }
                     ?: ratioMatchedStillSizes.last()
             }
             capStillForLiveStream && lens.hardwareLevelLabel == "LIMITED" && ratioMatchedStillSizes.isNotEmpty() -> {
-                ratioMatchedStillSizes.firstOrNull { it.width <= 2560 && it.height <= 1920 }
+                ratioMatchedStillSizes.firstOrNull { it.width <= 3264 && it.height <= 2448 }
                     ?: ratioMatchedStillSizes.last()
             }
-            (capStillForLiveStream || currentSettings.photoResolutionTier != PhotoResolutionTier.MAX) && ratioMatchedStillSizes.isNotEmpty() -> {
-                // Keep <= 12MP (4096x3072) when Live Photo MediaCodec stream is attached to prevent 50MP/200MP HAL overflow
-                ratioMatchedStillSizes.firstOrNull { it.width <= 4096 && it.height <= 3072 }
+            capStillForLiveStream && ratioMatchedStillSizes.isNotEmpty() -> {
+                // Allow crisp 12MP–16MP stills alongside Live Photo ring buffer on FULL/LEVEL_3 devices
+                ratioMatchedStillSizes.firstOrNull { it.width <= 4656 && it.height <= 3492 }
                     ?: ratioMatchedStillSizes.last()
             }
             currentSettings.photoResolutionTier == PhotoResolutionTier.MAX && ratioMatchedStillSizes.isNotEmpty() -> {
                 ratioMatchedStillSizes.first()
+            }
+            ratioMatchedStillSizes.isNotEmpty() -> {
+                ratioMatchedStillSizes.firstOrNull { it.width <= 4096 && it.height <= 3072 }
+                    ?: ratioMatchedStillSizes.first()
             }
             else -> Size(lens.standardPhotoWidth, lens.standardPhotoHeight)
         }
@@ -831,17 +850,58 @@ class CameraEngine(
             FlashMode.ON, FlashMode.AUTO -> builder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
         }
 
-        // Stabilization (OIS / EIS)
+        // Stabilization (OIS / EIS):
+        // CRITICAL: Never activate CONTROL_VIDEO_STABILIZATION_MODE_ON during still photo modes or still capture,
+        // because vendor Camera2 HALs apply heavy EIS crop + binned downscaling when enabled on photo streams.
         val stab = currentSettings.stabilizationMode
         if (lens.supportsOis && (stab == StabilizationMode.OIS || stab == StabilizationMode.HYBRID)) {
             builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON)
         } else {
             builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF)
         }
-        if (lens.supportsEis && (stab == StabilizationMode.EIS || stab == StabilizationMode.HYBRID)) {
+        if (isVideoFamilyMode() && !isStillCapture && lens.supportsEis && (stab == StabilizationMode.EIS || stab == StabilizationMode.HYBRID)) {
             builder.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON)
         } else {
             builder.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF)
+        }
+
+        // Hardware ISP Edge Enhancement, Noise Reduction & Aberration Correction
+        val chars = activeCharacteristics
+        if (chars != null) {
+            val edgeModes = chars.get(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES) ?: IntArray(0)
+            val nrModes = chars.get(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES) ?: IntArray(0)
+            val abModes = chars.get(CameraCharacteristics.COLOR_CORRECTION_AVAILABLE_ABERRATION_MODES) ?: IntArray(0)
+
+            val desiredEdge = when {
+                isStillCapture && edgeModes.contains(CameraMetadata.EDGE_MODE_HIGH_QUALITY) ->
+                    CameraMetadata.EDGE_MODE_HIGH_QUALITY
+                isVideoFamilyMode() && currentSettings.videoFps <= 30 && edgeModes.contains(CameraMetadata.EDGE_MODE_HIGH_QUALITY) ->
+                    CameraMetadata.EDGE_MODE_HIGH_QUALITY
+                edgeModes.contains(CameraMetadata.EDGE_MODE_FAST) ->
+                    CameraMetadata.EDGE_MODE_FAST
+                else -> null
+            }
+            if (desiredEdge != null) builder.set(CaptureRequest.EDGE_MODE, desiredEdge)
+
+            val desiredNr = when {
+                isStillCapture && nrModes.contains(CameraMetadata.NOISE_REDUCTION_MODE_HIGH_QUALITY) ->
+                    CameraMetadata.NOISE_REDUCTION_MODE_HIGH_QUALITY
+                nrModes.contains(CameraMetadata.NOISE_REDUCTION_MODE_FAST) ->
+                    CameraMetadata.NOISE_REDUCTION_MODE_FAST
+                else -> null
+            }
+            if (desiredNr != null) builder.set(CaptureRequest.NOISE_REDUCTION_MODE, desiredNr)
+
+            if (isStillCapture) {
+                val desiredAb = when {
+                    abModes.contains(CameraMetadata.COLOR_CORRECTION_ABERRATION_MODE_HIGH_QUALITY) ->
+                        CameraMetadata.COLOR_CORRECTION_ABERRATION_MODE_HIGH_QUALITY
+                    abModes.contains(CameraMetadata.COLOR_CORRECTION_ABERRATION_MODE_FAST) ->
+                        CameraMetadata.COLOR_CORRECTION_ABERRATION_MODE_FAST
+                    else -> null
+                }
+                if (desiredAb != null) builder.set(CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE, desiredAb)
+            }
         }
 
         // Exposure & ISO & Shutter
@@ -905,15 +965,9 @@ class CameraEngine(
             builder.set(CaptureRequest.CONTROL_AF_MODE, afMode)
         }
 
-        // HDR Scene Mode requires CONTROL_MODE_USE_SCENE_MODE; apply only on still captures without Live stream or fallback
-        if (isStillCapture &&
-            currentMode == CameraMode.PHOTO &&
-            currentSettings.hdrEnabled &&
-            lens.supportsHdrScene &&
-            livePhotoBuffer == null &&
-            !useMinimalTwoSurfaceFallback &&
-            currentFlash == FlashMode.OFF
-        ) {
+        // Hardware HDR Scene Mode when supported without Live stream/fallback;
+        // computational HDR tone-mapping handles all Live Photo & unsupported lens captures seamlessly.
+        if (shouldUseHardwareHdrScene(isStillCapture, lens)) {
             builder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_USE_SCENE_MODE)
             builder.set(CaptureRequest.CONTROL_SCENE_MODE, CaptureRequest.CONTROL_SCENE_MODE_HDR)
         }
@@ -925,6 +979,16 @@ class CameraEngine(
                 builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, range)
             }
         }
+    }
+
+    private fun shouldUseHardwareHdrScene(isStillCapture: Boolean, lens: CameraLensInfo): Boolean {
+        return isStillCapture &&
+            (currentMode == CameraMode.PHOTO || currentMode == CameraMode.PORTRAIT) &&
+            currentSettings.hdrMode != HdrMode.OFF &&
+            lens.supportsHdrScene &&
+            livePhotoBuffer == null &&
+            !useMinimalTwoSurfaceFallback &&
+            currentFlash == FlashMode.OFF
     }
 
     private fun bestSupportedAeFpsRange(targetFps: Int): Range<Int>? {
@@ -960,29 +1024,40 @@ class CameraEngine(
 
         val focusPointX = (normX.coerceIn(0f, 1f) * activeArray.width()).toInt()
         val focusPointY = (normY.coerceIn(0f, 1f) * activeArray.height()).toInt()
-        val halfSize = 140
+        val halfW = (activeArray.width() * 0.08f).roundToInt().coerceIn(80, 320)
+        val halfH = (activeArray.height() * 0.08f).roundToInt().coerceIn(80, 320)
+        val rectW = min(activeArray.width(), halfW * 2)
+        val rectH = min(activeArray.height(), halfH * 2)
+        val left = (focusPointX - halfW).coerceIn(0, (activeArray.width() - rectW).coerceAtLeast(0))
+        val top = (focusPointY - halfH).coerceIn(0, (activeArray.height() - rectH).coerceAtLeast(0))
         val meteringRect = MeteringRectangle(
-            max(0, focusPointX - halfSize),
-            max(0, focusPointY - halfSize),
-            min(activeArray.width(), halfSize * 2),
-            min(activeArray.height(), halfSize * 2),
+            left,
+            top,
+            rectW,
+            rectH,
             MeteringRectangle.METERING_WEIGHT_MAX - 1
         )
 
         runCatching {
             builder.set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(meteringRect))
             builder.set(CaptureRequest.CONTROL_AE_REGIONS, arrayOf(meteringRect))
-            builder.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_START)
-            session.capture(builder.build(), object : CameraCaptureSession.CaptureCallback() {
-                override fun onCaptureCompleted(s: CameraCaptureSession, r: CaptureRequest, res: TotalCaptureResult) {
-                    builder.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_IDLE)
-                    applyRepeatingRequestChanges()
-                }
-            }, handler)
+            builder.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_IDLE)
+            applyRepeatingRequestChanges()
+
+            val triggerBuilder = cameraDevice?.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)?.apply {
+                textureView?.surfaceTexture?.let { st -> addTarget(getOrCreatePreviewSurface(st)) }
+                applyRequestParameters(this, isStillCapture = false)
+                set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(meteringRect))
+                set(CaptureRequest.CONTROL_AE_REGIONS, arrayOf(meteringRect))
+                set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_START)
+            }
+            if (triggerBuilder != null) {
+                session.capture(triggerBuilder.build(), repeatingCaptureCallback, handler)
+            }
         }
     }
 
-    fun capturePhoto(isBurstShot: Boolean = false) {
+    fun capturePhoto(isBurstShot: Boolean = false, isMemeShot: Boolean = false) {
         val device = cameraDevice
         val session = captureSession
         val stillReader = stillImageReader
@@ -991,7 +1066,7 @@ class CameraEngine(
         if (device == null || session == null || stillReader == null || handler == null || lens == null) {
             _runtimeState.value = _runtimeState.value.copy(
                 isCapturing = false,
-                statusBanner = "Reconnecting camera..."
+                statusBanner = "Đang kết nối lại camera..."
             )
             openCameraIfReady()
             return
@@ -1012,9 +1087,63 @@ class CameraEngine(
                 _runtimeState.value = _runtimeState.value.copy(isCapturing = false)
             }
         }
-        val shutterMonotonicUs = SystemClock.elapsedRealtimeNanos() / 1000L
 
+        val isAutoFocusActive = currentMode != CameraMode.PRO || currentProParams.autoFocus
+        val curAfState = lastCaptureResult?.get(CaptureResult.CONTROL_AF_STATE)
+        val afSettled = !isAutoFocusActive ||
+            isBurstShot ||
+            curAfState == CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED ||
+            curAfState == CaptureResult.CONTROL_AF_STATE_PASSIVE_FOCUSED ||
+            lens.minFocusDistance <= 0f
+
+        if (!afSettled) {
+            scope.launch {
+                val startWaitMs = SystemClock.elapsedRealtime()
+                while (SystemClock.elapsedRealtime() - startWaitMs < 480L) {
+                    val state = lastCaptureResult?.get(CaptureResult.CONTROL_AF_STATE)
+                    if (state == CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED ||
+                        state == CaptureResult.CONTROL_AF_STATE_PASSIVE_FOCUSED ||
+                        state == CaptureResult.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED
+                    ) {
+                        break
+                    }
+                    delay(40L)
+                }
+                executeStillCaptureRequest(
+                    device = device,
+                    session = session,
+                    stillReader = stillReader,
+                    handler = handler,
+                    lens = lens,
+                    isBurstShot = isBurstShot,
+                    isMemeShot = isMemeShot
+                )
+            }
+        } else {
+            executeStillCaptureRequest(
+                device = device,
+                session = session,
+                stillReader = stillReader,
+                handler = handler,
+                lens = lens,
+                isBurstShot = isBurstShot,
+                isMemeShot = isMemeShot
+            )
+        }
+    }
+
+    private fun executeStillCaptureRequest(
+        device: CameraDevice,
+        session: CameraCaptureSession,
+        stillReader: ImageReader,
+        handler: Handler,
+        lens: CameraLensInfo,
+        isBurstShot: Boolean,
+        isMemeShot: Boolean
+    ) {
+        val shutterMonotonicUs = SystemClock.elapsedRealtimeNanos() / 1000L
         val capturedOrientation = getJpegOrientation(lens)
+        val usedHardwareHdr = shouldUseHardwareHdrScene(isStillCapture = true, lens = lens)
 
         val captureBuilder = runCatching {
             device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
@@ -1022,7 +1151,7 @@ class CameraEngine(
                 rawImageReader?.surface?.let { addTarget(it) }
                 applyRequestParameters(this, isStillCapture = true)
                 set(CaptureRequest.JPEG_ORIENTATION, capturedOrientation)
-                set(CaptureRequest.JPEG_QUALITY, 97.toByte())
+                set(CaptureRequest.JPEG_QUALITY, 99.toByte())
                 if (currentFlash == FlashMode.ON) {
                     set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_SINGLE)
                 }
@@ -1036,7 +1165,7 @@ class CameraEngine(
             return
         }
 
-        val wantLive = !isBurstShot && currentMode == CameraMode.PHOTO && currentLiveDuration != LivePhotoDuration.OFF
+        val wantLive = !isBurstShot && !isMemeShot && currentMode == CameraMode.PHOTO && currentLiveDuration != LivePhotoDuration.OFF
         val isPortraitCapture = currentMode == CameraMode.PORTRAIT
 
         val pairId = if (wantLive && livePhotoBuffer != null) UUID.randomUUID().toString() else null
@@ -1055,7 +1184,14 @@ class CameraEngine(
         val capturedFilter = currentFilter
         val capturedFilterIntensity = currentFilterIntensity
         val wantNaturalToneBoost = currentSettings.naturalColorBoostEnabled && capturedFilter == PhotoFilterPreset.NATURAL
-        val wantWatermark = currentSettings.cameraWatermarkEnabled && !currentProParams.captureRawDng
+        val wantWatermark = currentSettings.cameraWatermarkEnabled && !currentProParams.captureRawDng && !isMemeShot
+        val compHdrStrength = when (currentSettings.hdrMode) {
+            HdrMode.ALWAYS -> if (usedHardwareHdr) 0.38f else 0.78f
+            HdrMode.AUTO -> if (usedHardwareHdr) 0f else 0.36f
+            HdrMode.OFF -> 0f
+        }
+        val applyAiSuperSharp = currentSettings.cameraAiSuperSharpEnabled
+
         pendingStillCaptures.add(
             PendingStillCaptureMeta(
                 pairId = pairId,
@@ -1068,7 +1204,10 @@ class CameraEngine(
                 filterPreset = capturedFilter,
                 filterIntensity = capturedFilterIntensity,
                 applyNaturalToneBoost = wantNaturalToneBoost,
-                applyWatermark = wantWatermark
+                applyWatermark = wantWatermark,
+                computationalHdrStrength = compHdrStrength,
+                applyCameraAiSuperSharp = applyAiSuperSharp,
+                isMemeShot = isMemeShot
             )
         )
 
@@ -1142,14 +1281,15 @@ class CameraEngine(
                         val res = vp.processVideo(
                             sourceUri = android.net.Uri.fromFile(clip.file),
                             config = VideoEditConfig(
-                                targetResolution = VideoResolutionPreset.RES_720P,
+                                targetResolution = VideoResolutionPreset.RES_1080P,
                                 targetFps = 30,
                                 muteAudio = !clip.hasAudio,
                                 filter = filterPreset,
                                 filterIntensity = filterIntensity,
-                                preserveSourceAspect = true
+                                preserveSourceAspect = true,
+                                targetBitrateBps = if (currentSettings.livePhotoHighBitrate) 18_000_000 else 12_000_000
                             ),
-                            mode = AiProcessingMode.FAST,
+                            mode = AiProcessingMode.BALANCED,
                             onProgress = { _, _ -> }
                         )
                         filteredFile = res.outputFile
@@ -1340,7 +1480,10 @@ class CameraEngine(
         val filterPreset: PhotoFilterPreset = PhotoFilterPreset.NATURAL,
         val filterIntensity: Float = 0.88f,
         val applyNaturalToneBoost: Boolean = false,
-        val applyWatermark: Boolean = false
+        val applyWatermark: Boolean = false,
+        val computationalHdrStrength: Float = 0f,
+        val applyCameraAiSuperSharp: Boolean = false,
+        val isMemeShot: Boolean = false
     )
 
     private val pendingLiveClips = java.util.concurrent.ConcurrentHashMap<String, PendingLiveClipMeta>()
@@ -1373,6 +1516,8 @@ class CameraEngine(
 
         val appliedFilter = captureMeta?.filterPreset ?: PhotoFilterPreset.NATURAL
         val appliedIntensity = captureMeta?.filterIntensity ?: 0.88f
+        val compHdrStrength = captureMeta?.computationalHdrStrength ?: 0f
+        val applySuperSharp = captureMeta?.applyCameraAiSuperSharp == true
 
         scope.launch(Dispatchers.IO) {
             val postProcessed = processStillBytesForAspectAndPortrait(
@@ -1386,6 +1531,8 @@ class CameraEngine(
                 filterIntensity = appliedIntensity,
                 applyNaturalToneBoost = captureMeta?.applyNaturalToneBoost == true,
                 applyWatermark = captureMeta?.applyWatermark == true,
+                computationalHdrStrength = compHdrStrength,
+                applyCameraAiSuperSharp = applySuperSharp,
                 lensLabelWatermark = lens?.displayLabel ?: "Main",
                 isoWatermark = iso,
                 expWatermark = exp,
@@ -1403,12 +1550,12 @@ class CameraEngine(
                 if (isPortrait) append(" • Portrait")
                 if (filterLabel != null) append(" • $filterLabel")
             }
-            val aiTag = when {
-                isPortrait && filterLabel != null -> "Portrait • $filterLabel"
-                isPortrait -> "Portrait Bokeh"
-                filterLabel != null -> "Filter: $filterLabel"
-                else -> null
-            }
+            val aiTag = listOfNotNull(
+                if (applySuperSharp) "AI Siêu nét" else null,
+                if (compHdrStrength >= 0.35f) "HDR" else null,
+                if (isPortrait) "Chân dung" else null,
+                filterLabel
+            ).takeIf { it.isNotEmpty() }?.joinToString(" • ")
 
             var readyMeta: PendingLiveClipMeta? = null
             var stagedForClip = false
@@ -1488,13 +1635,18 @@ class CameraEngine(
             )
 
             savedResult.onSuccess { saved ->
+                if (captureMeta?.isMemeShot == true) {
+                    _capturedMemeAsset.value = saved
+                }
                 _runtimeState.value = _runtimeState.value.copy(
                     isCapturing = false,
                     statusBanner = when {
-                        pendingMeta != null -> "Saved Live Photo (${pendingMeta.durationSec}s)"
-                        isPortrait -> "Saved Portrait (${saved.width}x${saved.height})"
-                        filterLabel != null -> "Captured ${saved.width}x${saved.height} ($filterLabel)"
-                        else -> "Captured ${saved.width}x${saved.height} ${ext.uppercase()}"
+                        captureMeta?.isMemeShot == true -> "Đã chụp! Đang mở trình ghép Meme..."
+                        pendingMeta != null -> "Đã lưu Live Photo (${pendingMeta.durationSec}s)"
+                        isPortrait -> "Đã lưu Chân dung (${saved.width}x${saved.height})"
+                        filterLabel != null -> "Đã chụp ${saved.width}x${saved.height} ($filterLabel)"
+                        applySuperSharp -> "Đã chụp siêu nét ${saved.width}x${saved.height}"
+                        else -> "Đã chụp ${saved.width}x${saved.height} ${ext.uppercase()}"
                     }
                 )
             }.onFailure { err ->
@@ -1517,6 +1669,8 @@ class CameraEngine(
         filterIntensity: Float,
         applyNaturalToneBoost: Boolean,
         applyWatermark: Boolean,
+        computationalHdrStrength: Float,
+        applyCameraAiSuperSharp: Boolean,
         lensLabelWatermark: String,
         isoWatermark: Int?,
         expWatermark: Long?,
@@ -1547,12 +1701,22 @@ class CameraEngine(
                 !isPortraitBokeh &&
                 filterPreset == PhotoFilterPreset.NATURAL &&
                 !applyNaturalToneBoost &&
-                !applyWatermark
+                !applyWatermark &&
+                computationalHdrStrength <= 0.02f &&
+                !applyCameraAiSuperSharp
             ) {
                 return null
             }
 
-            val decoded = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+            // Guard against ultra-high-megapixel (e.g. 50MP/108MP) OOM while preserving >= 12-20MP native clarity
+            val pixelCount = bw.toLong() * bh.toLong()
+            val decodeSample = if (pixelCount > 22_000_000L) 2 else 1
+            val decodeOpts = android.graphics.BitmapFactory.Options().apply {
+                inSampleSize = decodeSample
+                inPreferredConfig = android.graphics.Bitmap.Config.ARGB_8888
+            }
+            val decoded = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, decodeOpts)
+                ?: return null
             val orientMatrix = Matrix().apply {
                 when (exifOrient) {
                     android.media.ExifInterface.ORIENTATION_ROTATE_90 -> postRotate(90f)
@@ -1593,18 +1757,40 @@ class CameraEngine(
                 cropped
             }
 
+            val hdrApplied = if (computationalHdrStrength > 0.02f) {
+                ImageProcessor.applyComputationalHdr(
+                    source = bokehApplied,
+                    strength = computationalHdrStrength
+                ).also {
+                    if (it !== bokehApplied) bokehApplied.recycle()
+                }
+            } else {
+                bokehApplied
+            }
+
+            val sharpApplied = if (applyCameraAiSuperSharp) {
+                ImageProcessor.applyCameraAiSuperSharp(
+                    source = hdrApplied,
+                    strength = 0.86f
+                ).also {
+                    if (it !== hdrApplied) hdrApplied.recycle()
+                }
+            } else {
+                hdrApplied
+            }
+
             val colorStyledBmp = when {
                 filterPreset != PhotoFilterPreset.NATURAL && filterIntensity > 0.01f -> {
-                    ImageProcessor.applyFilterToBitmap(bokehApplied, filterPreset, filterIntensity).also {
-                        if (it !== bokehApplied) bokehApplied.recycle()
+                    ImageProcessor.applyFilterToBitmap(sharpApplied, filterPreset, filterIntensity).also {
+                        if (it !== sharpApplied) sharpApplied.recycle()
                     }
                 }
                 applyNaturalToneBoost -> {
-                    ImageProcessor.applyFlagshipNaturalTone(bokehApplied).also {
-                        if (it !== bokehApplied) bokehApplied.recycle()
+                    ImageProcessor.applyFlagshipNaturalTone(sharpApplied).also {
+                        if (it !== sharpApplied) sharpApplied.recycle()
                     }
                 }
-                else -> bokehApplied
+                else -> sharpApplied
             }
 
             val finalBmp = if (applyWatermark) {
@@ -1622,7 +1808,7 @@ class CameraEngine(
             }
 
             val out = ByteArrayOutputStream()
-            finalBmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 96, out)
+            finalBmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 98, out)
             val outBytes = out.toByteArray()
             val outW = finalBmp.width
             val outH = finalBmp.height
@@ -1681,6 +1867,7 @@ class CameraEngine(
 
         val isSlowMo = currentMode == CameraMode.SLOW_MOTION && currentSlowMoOption != null
         val isTimelapse = currentMode == CameraMode.TIMELAPSE
+        val map = activeCharacteristics?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
 
         val targetW: Int
         val targetH: Int
@@ -1692,12 +1879,23 @@ class CameraEngine(
             targetFps = sm.fps
         } else {
             val resPreset = currentSettings.videoResolution
-            targetW = resPreset.width
-            targetH = resPreset.height
+            val recSizes = map?.getOutputSizes(MediaRecorder::class.java)?.toList().orEmpty()
+            val matchedRecSize = recSizes.firstOrNull { it.width == resPreset.width && it.height == resPreset.height }
+                ?: recSizes
+                    .filter { it.width <= resPreset.width && it.height <= resPreset.height }
+                    .maxByOrNull { it.width * it.height }
+            targetW = matchedRecSize?.width ?: resPreset.width
+            targetH = matchedRecSize?.height ?: resPreset.height
             targetFps = currentSettings.videoFps
         }
 
-        val bitrate = currentSettings.videoBitrateTier.bitsPerSecond
+        val minFloorBitrate = when {
+            targetW >= 3800 -> 50_000_000
+            targetFps >= 60 -> 36_000_000
+            targetW >= 1900 -> 24_000_000
+            else -> 16_000_000
+        }
+        val bitrate = max(currentSettings.videoBitrateTier.bitsPerSecond, minFloorBitrate)
         val videoFile = File(context.cacheDir, "rec_${System.currentTimeMillis()}.mp4")
         val gyroFile = File(context.cacheDir, "gyro_${System.currentTimeMillis()}.csv")
 
@@ -1758,7 +1956,6 @@ class CameraEngine(
 
         val activePreviewSurface = getOrCreatePreviewSurface(st)
         val recSurface = recorder.surface
-        val map = activeCharacteristics?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
         val aeRanges = activeCharacteristics?.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES).orEmpty()
         val aeSupportsTarget60 = targetFps >= 60 && aeRanges.any { it.upper >= 60 }
         val highSpeed60Range = if (targetFps >= 60 && !aeSupportsTarget60) {
@@ -1957,12 +2154,13 @@ class CameraEngine(
                                 muteAudio = recMuted,
                                 filter = recFilter,
                                 filterIntensity = recFilterIntensity,
-                                preserveSourceAspect = true
+                                preserveSourceAspect = true,
+                                targetBitrateBps = activeVideoBitrate
                             ),
-                            mode = AiProcessingMode.BALANCED,
+                            mode = AiProcessingMode.QUALITY,
                             onProgress = { pct, _ ->
                                 _runtimeState.value = _runtimeState.value.copy(
-                                    statusBanner = "Applying ${recFilter.label} filter ($pct%)..."
+                                    statusBanner = "Đang áp dụng bộ lọc ${recFilter.label} ($pct%)..."
                                 )
                             }
                         )
@@ -2090,7 +2288,7 @@ class CameraEngine(
                 }
             }
         }
-        val bounded = choices.filter { it.width <= 1920 && it.height <= 1080 }
+        val bounded = choices.filter { it.width <= 1920 && it.height <= 1440 }
         val pool = bounded.ifEmpty { choices.toList() }
         return pool.minByOrNull { size ->
             val r = size.width.toFloat() / size.height.toFloat().coerceAtLeast(1f)
