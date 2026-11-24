@@ -71,6 +71,8 @@ import com.example.ui.theme.MonoTelemetrySmall
 import com.example.ui.theme.MutedSlate
 import com.example.ui.theme.PureBlack
 import com.example.ui.theme.PureWhite
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.util.EnumMap
 
 enum class FilterShelfTab(val label: String, val isLeicaDot: Boolean) {
@@ -102,23 +104,39 @@ private object FilterSamplePreviewCache {
     private val bitmapCache = EnumMap<FilterSampleSubject, ImageBitmap>(FilterSampleSubject::class.java)
     private val colorFilterCache = EnumMap<PhotoFilterPreset, ColorFilter>(PhotoFilterPreset::class.java)
 
-    fun getSampleImage(context: Context, subject: FilterSampleSubject): ImageBitmap? {
-        bitmapCache[subject]?.let { return it }
-        val resId = when (subject) {
-            FilterSampleSubject.STREET_GOLDEN -> R.drawable.img_filter_golden_street
-            FilterSampleSubject.PORTRAIT_SKIN -> R.drawable.img_filter_portrait_warm
-            FilterSampleSubject.CAFE_ANALOG -> R.drawable.img_filter_cafe_coffee
-            FilterSampleSubject.SCENIC_BLUE -> R.drawable.img_filter_scenic_blue
+    fun getCachedSamples(): Map<FilterSampleSubject, ImageBitmap> = synchronized(bitmapCache) {
+        if (bitmapCache.isEmpty()) emptyMap() else EnumMap(bitmapCache)
+    }
+
+    suspend fun warmUpSamples(context: Context): Map<FilterSampleSubject, ImageBitmap> = withContext(Dispatchers.IO) {
+        synchronized(bitmapCache) {
+            if (bitmapCache.size == FilterSampleSubject.entries.size) {
+                return@withContext EnumMap(bitmapCache)
+            }
         }
+        val appCtx = context.applicationContext
         val opts = BitmapFactory.Options().apply {
             inSampleSize = 6
             inPreferredConfig = Bitmap.Config.RGB_565
         }
-        val decoded = BitmapFactory.decodeResource(context.resources, resId, opts)?.asImageBitmap()
-        if (decoded != null) {
-            bitmapCache[subject] = decoded
+        for (subject in FilterSampleSubject.entries) {
+            val alreadyLoaded = synchronized(bitmapCache) { bitmapCache.containsKey(subject) }
+            if (!alreadyLoaded) {
+                val resId = when (subject) {
+                    FilterSampleSubject.STREET_GOLDEN -> R.drawable.img_filter_golden_street
+                    FilterSampleSubject.PORTRAIT_SKIN -> R.drawable.img_filter_portrait_warm
+                    FilterSampleSubject.CAFE_ANALOG -> R.drawable.img_filter_cafe_coffee
+                    FilterSampleSubject.SCENIC_BLUE -> R.drawable.img_filter_scenic_blue
+                }
+                val decoded = BitmapFactory.decodeResource(appCtx.resources, resId, opts)?.asImageBitmap()
+                if (decoded != null) {
+                    synchronized(bitmapCache) {
+                        bitmapCache[subject] = decoded
+                    }
+                }
+            }
         }
-        return decoded
+        synchronized(bitmapCache) { EnumMap(bitmapCache) }
     }
 
     fun getColorFilter(preset: PhotoFilterPreset): ColorFilter? {
@@ -135,11 +153,18 @@ fun FilterPreviewThumb(
     selected: Boolean,
     accent: Color,
     size: Dp = 52.dp,
-    cornerRadius: Dp = 12.dp
+    cornerRadius: Dp = 12.dp,
+    sampleBitmapOverride: ImageBitmap? = null
 ) {
     val context = LocalContext.current
-    val sampleBitmap = remember(preset.sampleSubject) {
-        FilterSamplePreviewCache.getSampleImage(context, preset.sampleSubject)
+    var sampleBitmap by remember(preset.sampleSubject, sampleBitmapOverride) {
+        mutableStateOf(sampleBitmapOverride ?: FilterSamplePreviewCache.getCachedSamples()[preset.sampleSubject])
+    }
+    LaunchedEffect(preset.sampleSubject, sampleBitmap) {
+        if (sampleBitmap == null) {
+            val loaded = FilterSamplePreviewCache.warmUpSamples(context)
+            sampleBitmap = loaded[preset.sampleSubject]
+        }
     }
     val filterColor = remember(preset) {
         FilterSamplePreviewCache.getColorFilter(preset)
@@ -157,9 +182,9 @@ fun FilterPreviewThumb(
                 shape = shape
             )
     ) {
-        if (sampleBitmap != null) {
+        sampleBitmap?.let { bmp ->
             Image(
-                bitmap = sampleBitmap,
+                bitmap = bmp,
                 contentDescription = preset.label,
                 contentScale = ContentScale.Crop,
                 colorFilter = filterColor,
@@ -192,12 +217,20 @@ fun CameraFilterBar(
     onToggleNaturalBoost: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     val accent = LocalAccentColor.current
     var shelfTab by remember { mutableStateOf(FilterShelfTab.ALL) }
     val animEnabled = LocalAnimationsEnabled.current
     val listState = rememberLazyListState()
+    var sampleImages by remember { mutableStateOf(FilterSamplePreviewCache.getCachedSamples()) }
 
     val displayedPresets = remember(shelfTab) { shelfTab.filterPresets() }
+
+    LaunchedEffect(Unit) {
+        if (sampleImages.size < FilterSampleSubject.entries.size) {
+            sampleImages = FilterSamplePreviewCache.warmUpSamples(context)
+        }
+    }
 
     LaunchedEffect(visible, shelfTab) {
         if (visible) {
@@ -312,7 +345,8 @@ fun CameraFilterBar(
                             selected = selected,
                             accent = accent,
                             size = 52.dp,
-                            cornerRadius = 11.dp
+                            cornerRadius = 11.dp,
+                            sampleBitmapOverride = sampleImages[preset.sampleSubject]
                         )
                         Text(
                             text = preset.label,

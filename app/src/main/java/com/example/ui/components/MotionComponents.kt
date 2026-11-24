@@ -116,12 +116,11 @@ object HungCamMotion {
         }
         val sign = if (forward) 1 else -1
         return (
-            slideInHorizontally(animationSpec = tween(280, easing = EmphasizedDecelerate)) { w -> sign * (w / 7) } +
-                fadeIn(tween(250, easing = EmphasizedDecelerate)) +
-                scaleIn(initialScale = 0.97f, animationSpec = tween(280, easing = EmphasizedDecelerate))
+            slideInHorizontally(animationSpec = tween(190, easing = EmphasizedDecelerate)) { w -> sign * (w / 10) } +
+                fadeIn(tween(180, easing = EmphasizedDecelerate))
             ) togetherWith (
-            slideOutHorizontally(animationSpec = tween(230, easing = EmphasizedDecelerate)) { w -> -sign * (w / 10) } +
-                fadeOut(tween(200, easing = EmphasizedDecelerate))
+            slideOutHorizontally(animationSpec = tween(150, easing = EmphasizedDecelerate)) { w -> -sign * (w / 14) } +
+                fadeOut(tween(140, easing = EmphasizedDecelerate))
             )
     }
 }

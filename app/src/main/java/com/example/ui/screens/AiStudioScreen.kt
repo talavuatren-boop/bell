@@ -271,6 +271,8 @@ fun AiStudioScreen(
                 val enhBmp = aiOutput.enhancedPreviewBitmap
 
                 if (origBmp != null && enhBmp != null) {
+                    val origImageBitmap = remember(origBmp) { origBmp.asImageBitmap() }
+                    val enhImageBitmap = remember(enhBmp) { enhBmp.asImageBitmap() }
                     BoxWithConstraints(
                         modifier = Modifier
                             .fillMaxSize()
@@ -287,7 +289,7 @@ fun AiStudioScreen(
 
                         if (holdingOriginal) {
                             Image(
-                                bitmap = origBmp.asImageBitmap(),
+                                bitmap = origImageBitmap,
                                 contentDescription = "Ảnh gốc",
                                 contentScale = ContentScale.Fit,
                                 modifier = Modifier.fillMaxSize()
@@ -304,7 +306,7 @@ fun AiStudioScreen(
                             )
                         } else {
                             Image(
-                                bitmap = enhBmp.asImageBitmap(),
+                                bitmap = enhImageBitmap,
                                 contentDescription = "Ảnh sau khi nâng cấp AI",
                                 contentScale = ContentScale.Fit,
                                 modifier = Modifier.fillMaxSize()
@@ -316,7 +318,7 @@ fun AiStudioScreen(
                                     .clipToBounds()
                             ) {
                                 Image(
-                                    bitmap = origBmp.asImageBitmap(),
+                                    bitmap = origImageBitmap,
                                     contentDescription = "Ảnh gốc",
                                     contentScale = ContentScale.Fit,
                                     modifier = Modifier

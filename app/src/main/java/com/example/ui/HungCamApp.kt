@@ -89,8 +89,6 @@ fun HungCamApp(
 ) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val editorNotice by viewModel.editorExportNotice.collectAsStateWithLifecycle()
-    val activeAssets by viewModel.activeAssets.collectAsStateWithLifecycle()
-    val deletedAssets by viewModel.deletedAssets.collectAsStateWithLifecycle()
     val capturedMemeAsset by viewModel.capturedMemeAsset.collectAsStateWithLifecycle()
 
     var currentTab by remember { mutableStateOf(MainNavDestination.CAMERA) }
@@ -138,6 +136,8 @@ fun HungCamApp(
             ) { sub ->
                 when (sub) {
                     is SubScreen.Viewer -> {
+                        val activeAssets by viewModel.activeAssets.collectAsStateWithLifecycle()
+                        val deletedAssets by viewModel.deletedAssets.collectAsStateWithLifecycle()
                         val viewerIds = remember(sub.assets) { sub.assets.map { it.id }.toSet() }
                         val fromTrash = remember(sub.assets) { sub.assets.firstOrNull()?.isDeleted == true }
                         val liveAssets = remember(activeAssets, deletedAssets, viewerIds, fromTrash) {

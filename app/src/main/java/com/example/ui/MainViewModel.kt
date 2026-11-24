@@ -56,7 +56,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -121,7 +124,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _flashMode = MutableStateFlow(FlashMode.OFF)
     val flashMode: StateFlow<FlashMode> = _flashMode.asStateFlow()
 
-    private val _liveDuration = MutableStateFlow(LivePhotoDuration.THREE_SEC)
+    private val _liveDuration = MutableStateFlow(LivePhotoDuration.OFF)
     val liveDuration: StateFlow<LivePhotoDuration> = _liveDuration.asStateFlow()
 
     private val _selfTimer = MutableStateFlow(SelfTimerDuration.OFF)
@@ -198,6 +201,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var mergeJob: Job? = null
     private var clockJob: Job? = null
     private var initializedFromSettings = false
+    private var lastCameraSettingsHash: Int = 0
 
     init {
         refreshCapabilities()
@@ -205,12 +209,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         startRecordingClockLoop()
         viewModelScope.launch {
             settings.collect { s ->
+                val camHash = java.util.Objects.hash(
+                    s.photoFormat,
+                    s.photoResolutionTier,
+                    s.hdrMode,
+                    s.videoResolution,
+                    s.videoFps,
+                    s.stabilizationMode,
+                    s.aspectRatio,
+                    s.livePhotoSoundEnabled,
+                    s.livePhotoHighBitrate,
+                    s.lowEndOptimizedMode
+                )
                 if (!initializedFromSettings) {
                     initializedFromSettings = true
                     _cameraMode.value = s.defaultCameraMode
                     _liveDuration.value = s.livePhotoDefaultDuration
+                    lastCameraSettingsHash = camHash
+                    syncSession()
+                } else if (camHash != lastCameraSettingsHash) {
+                    lastCameraSettingsHash = camHash
+                    syncSession()
                 }
-                syncSession()
             }
         }
     }
@@ -247,8 +267,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } else {
                 validProfile.supportedFps.first()
             }
-            viewModelScope.launch {
-                settingsStore.update { it.copy(videoResolution = validProfile.resolution, videoFps = validFps) }
+            if (validProfile.resolution != settings.value.videoResolution || validFps != settings.value.videoFps) {
+                viewModelScope.launch {
+                    settingsStore.update { it.copy(videoResolution = validProfile.resolution, videoFps = validFps) }
+                }
             }
         }
         // Reset PRO focus/ISO safely into supported sensor bounds
@@ -831,10 +853,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun startRecordingClockLoop() {
         clockJob?.cancel()
         clockJob = viewModelScope.launch {
-            while (true) {
-                cameraEngine.tickRecordingClock()
-                delay(200L)
-            }
+            cameraRuntime
+                .map { it.isRecording }
+                .distinctUntilChanged()
+                .collectLatest { recording ->
+                    while (recording) {
+                        cameraEngine.tickRecordingClock()
+                        delay(200L)
+                    }
+                }
         }
     }
 

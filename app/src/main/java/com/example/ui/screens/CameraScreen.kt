@@ -153,6 +153,8 @@ import com.example.ui.theme.PureBlack
 import com.example.ui.theme.PureWhite
 import com.example.ui.theme.resolveCameraModeColor
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 
 @Composable
 fun CameraScreen(
@@ -178,13 +180,14 @@ fun CameraScreen(
     val proParams by viewModel.proParams.collectAsStateWithLifecycle()
     val proCaptureType by viewModel.proCaptureType.collectAsStateWithLifecycle()
     val portraitBokeh by viewModel.portraitBokehStrength.collectAsStateWithLifecycle()
-    val runtime by viewModel.cameraRuntime.collectAsStateWithLifecycle()
+    val isRecording by remember(viewModel) {
+        viewModel.cameraRuntime.map { it.isRecording }.distinctUntilChanged()
+    }.collectAsStateWithLifecycle(initialValue = false)
     val timelapseSpeed by viewModel.timelapseSpeed.collectAsStateWithLifecycle()
     val slowMoOption by viewModel.slowMoOption.collectAsStateWithLifecycle()
     val activeFilter by viewModel.cameraFilter.collectAsStateWithLifecycle()
     val filterIntensity by viewModel.cameraFilterIntensity.collectAsStateWithLifecycle()
     val isMemeMode by viewModel.isMemeCaptureMode.collectAsStateWithLifecycle()
-    val assets by viewModel.activeAssets.collectAsStateWithLifecycle()
     val activeModeColor by animateColorAsState(
         targetValue = resolveCameraModeColor(mode, settings.modeColorStyle, accent),
         animationSpec = tween(200),
@@ -236,7 +239,6 @@ fun CameraScreen(
     var showPortraitBokehBar by remember { mutableStateOf(true) }
     var showProControlDeck by remember { mutableStateOf(true) }
     var shutterFlashTrigger by remember { mutableStateOf(0) }
-    var wasCapturing by remember { mutableStateOf(false) }
     val animEnabled = LocalAnimationsEnabled.current
 
     BackHandler(enabled = showQuickGrid || showMoreModesPanel || showFilterStrip || showZoomSlider) {
@@ -248,25 +250,11 @@ fun CameraScreen(
         }
     }
 
-    LaunchedEffect(runtime.isCapturing) {
-        if (runtime.isCapturing && !wasCapturing) {
-            shutterFlashTrigger += 1
-        }
-        wasCapturing = runtime.isCapturing
-    }
-
     LaunchedEffect(focusPoint) {
         if (focusPoint != null) {
             showFocusReticle = true
             delay(1400L)
             showFocusReticle = false
-        }
-    }
-
-    LaunchedEffect(runtime.statusBanner, runtime.errorMessage) {
-        if (runtime.statusBanner != null || runtime.errorMessage != null) {
-            delay(2800L)
-            viewModel.cameraEngine.clearStatusMessages()
         }
     }
 
@@ -279,10 +267,6 @@ fun CameraScreen(
         mode == CameraMode.SLOW_MOTION ||
         mode == CameraMode.TIMELAPSE ||
         (mode == CameraMode.PRO && proCaptureType == ProCaptureType.VIDEO)
-
-    val latestPhoto = remember(assets) {
-        assets.firstOrNull { it.typeEnum != MediaItemType.VIDEO }
-    }
 
     if (!hasCameraPerm) {
         Box(
@@ -421,7 +405,7 @@ fun CameraScreen(
                                 .clip(RoundedCornerShape(12.dp))
                                 .background(ElevatedObsidian)
                                 .border(0.75.dp, HairlineBorder, RoundedCornerShape(12.dp))
-                                .clickable(enabled = combos.isNotEmpty() && !runtime.isRecording) {
+                                .clickable(enabled = combos.isNotEmpty() && !isRecording) {
                                     val curIdx = combos.indexOfFirst {
                                         it.first == settings.videoResolution && it.second == settings.videoFps
                                     }
@@ -480,7 +464,7 @@ fun CameraScreen(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(10.dp))
                                     .background(activeModeColor)
-                                    .clickable(enabled = !runtime.isRecording) {
+                                    .clickable(enabled = !isRecording) {
                                         val next = if (proCaptureType == ProCaptureType.PHOTO) ProCaptureType.VIDEO else ProCaptureType.PHOTO
                                         viewModel.setProCaptureType(next)
                                     }
@@ -507,7 +491,7 @@ fun CameraScreen(
                                 .clip(RoundedCornerShape(12.dp))
                                 .background(activeModeColor.copy(alpha = 0.14f))
                                 .border(0.75.dp, activeModeColor.copy(alpha = 0.55f), RoundedCornerShape(12.dp))
-                                .clickable(enabled = options.isNotEmpty() && !runtime.isRecording) {
+                                .clickable(enabled = options.isNotEmpty() && !isRecording) {
                                     val idx = options.indexOf(slowMoOption)
                                     viewModel.setSlowMoOption(options[(idx + 1) % options.size])
                                 }
@@ -525,7 +509,7 @@ fun CameraScreen(
                                 .clip(RoundedCornerShape(12.dp))
                                 .background(activeModeColor.copy(alpha = 0.14f))
                                 .border(0.75.dp, activeModeColor.copy(alpha = 0.55f), RoundedCornerShape(12.dp))
-                                .clickable(enabled = !runtime.isRecording) {
+                                .clickable(enabled = !isRecording) {
                                     val idx = speeds.indexOf(timelapseSpeed)
                                     viewModel.setTimelapseSpeed(speeds[(idx + 1) % speeds.size])
                                 }
@@ -579,82 +563,25 @@ fun CameraScreen(
             }
 
             // Right Minimal Telemetry + Top-Right Settings Gear: Recording Clock OR Active Filter/Focal + Gear
-            Row(
-                modifier = Modifier.align(Alignment.CenterEnd),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                if (runtime.isRecording) {
-                    val secs = (runtime.recordingElapsedMs / 1000L).toInt()
-                    Row(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(CrimsonShutter)
-                            .padding(horizontal = 9.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(5.dp)
-                    ) {
-                        Box(modifier = Modifier.size(6.dp).background(PureWhite, CircleShape))
-                        Text(
-                            text = String.format("%02d:%02d", secs / 60, secs % 60),
-                            style = MonoTelemetryLarge.copy(fontSize = 12.sp),
-                            color = PureWhite
-                        )
+            IsolatedTopRightTelemetryAndSettings(
+                viewModel = viewModel,
+                activeLens = activeLens,
+                selfTimer = selfTimer,
+                activeFilter = activeFilter,
+                accent = accent,
+                onClickTelemetry = {
+                    viewModel.performHapticTick()
+                    if (activeFilter != PhotoFilterPreset.NATURAL) {
+                        showQuickGrid = false
+                        showFilterStrip = !showFilterStrip
+                    } else {
+                        showFilterStrip = false
+                        showQuickGrid = !showQuickGrid
                     }
-                } else {
-                    if (selfTimer != com.example.model.SelfTimerDuration.OFF) {
-                        Text(
-                            text = selfTimer.label,
-                            style = MonoTelemetrySmall.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold),
-                            color = accent
-                        )
-                    }
-                    val opticLabel = activeLens?.let { lens ->
-                        val mm = (lens.equivalentFocalLengthMm * runtime.activeZoom).toInt().coerceAtLeast(10)
-                        "${mm}mm"
-                    } ?: "LEICA"
-                    Text(
-                        text = if (activeFilter != PhotoFilterPreset.NATURAL) activeFilter.label else opticLabel,
-                        style = MonoTelemetrySmall.copy(fontSize = 10.sp, fontWeight = FontWeight.SemiBold),
-                        color = if (activeFilter != PhotoFilterPreset.NATURAL) accent else MutedSlate,
-                        maxLines = 1,
-                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                        modifier = Modifier
-                            .widthIn(max = 72.dp)
-                            .clip(RoundedCornerShape(10.dp))
-                            .clickable {
-                                viewModel.performHapticTick()
-                                if (activeFilter != PhotoFilterPreset.NATURAL) {
-                                    showQuickGrid = false
-                                    showFilterStrip = !showFilterStrip
-                                } else {
-                                    showFilterStrip = false
-                                    showQuickGrid = !showQuickGrid
-                                }
-                            }
-                            .padding(horizontal = 5.dp, vertical = 4.dp)
-                    )
-                    SpringIconButton(
-                        onClick = {
-                            viewModel.performHapticTick()
-                            onOpenSettings()
-                        },
-                        modifier = Modifier
-                            .size(36.dp)
-                            .clip(CircleShape)
-                            .background(Color(0xFF181A20))
-                            .border(0.6.dp, HairlineBorder, CircleShape)
-                            .testTag("camera_top_settings_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Outlined.Settings,
-                            contentDescription = "Cài đặt Camera",
-                            tint = PureWhite,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-                }
-            }
+                },
+                onOpenSettings = onOpenSettings,
+                modifier = Modifier.align(Alignment.CenterEnd)
+            )
         }
 
         // 2. Main Aspect-Locked Viewfinder Workspace + Translucent Quick Grid + Floating Zoom/Filter Bar
@@ -696,7 +623,9 @@ fun CameraScreen(
                         .pointerInput(activeLens) {
                             detectTransformGestures { _, _, zoomChange, _ ->
                                 if (zoomChange != 1f) {
-                                    viewModel.cameraEngine.setZoomRatio(runtime.activeZoom * zoomChange)
+                                    viewModel.cameraEngine.setZoomRatio(
+                                        viewModel.cameraEngine.currentZoomRatio() * zoomChange
+                                    )
                                 }
                             }
                         }
@@ -736,12 +665,6 @@ fun CameraScreen(
                         factory = { ctx ->
                             val rot = getDisplayRotationDegrees(ctx)
                             TextureView(ctx).also { tv ->
-                                val layerType = if (liveFilterPaint == null) {
-                                    android.view.View.LAYER_TYPE_NONE
-                                } else {
-                                    android.view.View.LAYER_TYPE_HARDWARE
-                                }
-                                tv.setLayerType(layerType, liveFilterPaint)
                                 tv.setLayerPaint(liveFilterPaint)
                                 lastAppliedState[0] = filterKey
                                 lastAppliedState[1] = rot
@@ -755,12 +678,6 @@ fun CameraScreen(
                         },
                         update = { tv ->
                             if (lastAppliedState[0] != filterKey) {
-                                val layerType = if (liveFilterPaint == null) {
-                                    android.view.View.LAYER_TYPE_NONE
-                                } else {
-                                    android.view.View.LAYER_TYPE_HARDWARE
-                                }
-                                tv.setLayerType(layerType, liveFilterPaint)
                                 tv.setLayerPaint(liveFilterPaint)
                                 tv.invalidate()
                                 lastAppliedState[0] = filterKey
@@ -786,7 +703,10 @@ fun CameraScreen(
                         secondsRemaining = countdown,
                         modifier = Modifier.align(Alignment.Center)
                     )
-                    ShutterFlashOverlay(triggerCount = shutterFlashTrigger)
+                    IsolatedShutterFlashOverlay(
+                        viewModel = viewModel,
+                        tapTriggerCount = shutterFlashTrigger
+                    )
                 }
             }
 
@@ -808,108 +728,30 @@ fun CameraScreen(
                 }
             }
 
-            // Live Photo 2s/3s/5s/10s Post-Shutter Capture Progress Pill
-            Box(
+            // Live Photo Capture Progress Pill + Status/Error Banner (isolated recomposition scope)
+            IsolatedViewfinderBanners(
+                viewModel = viewModel,
+                animEnabled = animEnabled,
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .padding(top = 12.dp)
-            ) {
-                OverlayAnimatedVisibility(
-                    visible = runtime.livePhotoCaptureProgress != null && runtime.livePhotoDurationSec > 0,
-                    enter = if (animEnabled) fadeIn(tween(160)) + slideInVertically { -it / 2 } else fadeIn(tween(0)),
-                    exit = if (animEnabled) fadeOut(tween(150)) + slideOutVertically { -it / 2 } else fadeOut(tween(0))
-                ) {
-                    LivePhotoCaptureProgressPill(
-                        progress = runtime.livePhotoCaptureProgress ?: 0f,
-                        durationSec = runtime.livePhotoDurationSec.coerceAtLeast(2)
-                    )
-                }
-            }
-
-            // Status / Error Toast Banner
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = 12.dp)
-            ) {
-                OverlayAnimatedVisibility(
-                    visible = (runtime.statusBanner != null || runtime.errorMessage != null) &&
-                        runtime.livePhotoCaptureProgress == null,
-                    enter = if (animEnabled) fadeIn(tween(180)) + slideInVertically { -it / 2 } else fadeIn(tween(0)),
-                    exit = if (animEnabled) fadeOut(tween(150)) + slideOutVertically { -it / 2 } else fadeOut(tween(0))
-                ) {
-                    val isErr = runtime.errorMessage != null
-                    Text(
-                        text = runtime.errorMessage ?: runtime.statusBanner.orEmpty(),
-                        style = MonoTelemetrySmall,
-                        color = PureWhite,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(if (isErr) CrimsonShutter.copy(alpha = 0.88f) else Color.Black.copy(alpha = 0.72f))
-                            .border(0.6.dp, HairlineBorder, RoundedCornerShape(14.dp))
-                            .padding(horizontal = 12.dp, vertical = 6.dp)
-                    )
-                }
-            }
-
-            // Clean viewfinder: HDR control is neatly placed in the Top Bar without obstructing preview corners
+            )
 
             // Active Meme Mode Prompt Pill (Shoot -> Auto Open Sticker & Meme Editor)
-            Box(
+            IsolatedMemeModeBanner(
+                viewModel = viewModel,
+                visible = isMemeMode && !isRecording,
+                accent = accent,
+                animEnabled = animEnabled,
+                onOpenStickersMeme = onOpenStickersMeme,
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .padding(top = 42.dp)
-            ) {
-                OverlayAnimatedVisibility(
-                    visible = isMemeMode && !runtime.isRecording,
-                    enter = if (animEnabled) fadeIn(tween(180)) + slideInVertically { -it / 2 } else fadeIn(tween(0)),
-                    exit = if (animEnabled) fadeOut(tween(140)) + slideOutVertically { -it / 2 } else fadeOut(tween(0))
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(Color(0xD9101216))
-                            .border(1.dp, accent, RoundedCornerShape(16.dp))
-                            .padding(horizontal = 12.dp, vertical = 6.dp)
-                            .testTag("camera_meme_mode_banner"),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Text(
-                            text = "MEME • Chụp để ghép Sticker & Chữ",
-                            style = MonoTelemetrySmall.copy(fontSize = 11.sp, fontWeight = FontWeight.Bold),
-                            color = PureWhite
-                        )
-                        if (latestPhoto != null) {
-                            Text(
-                                text = "Ảnh cũ",
-                                style = MonoTelemetrySmall.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold),
-                                color = accent,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(accent.copy(alpha = 0.16f))
-                                    .clickable {
-                                        viewModel.setMemeCaptureMode(false)
-                                        onOpenStickersMeme(latestPhoto)
-                                    }
-                                    .padding(horizontal = 6.dp, vertical = 2.dp)
-                            )
-                        }
-                        Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = "Thoát chế độ Meme",
-                            tint = MutedSlate,
-                            modifier = Modifier
-                                .size(16.dp)
-                                .clickable { viewModel.setMemeCaptureMode(false) }
-                                .testTag("camera_meme_mode_close")
-                        )
-                    }
-                }
-            }
+            )
 
             // Expandable Translucent 4-Column Quick Grid overlaid cleanly over lower viewfinder (Screenshot 1)
-            ModeQuickControlGrid(
+            IsolatedQuickControlGrid(
+                viewModel = viewModel,
                 visible = showQuickGrid,
                 mode = mode,
                 settings = settings,
@@ -919,116 +761,14 @@ fun CameraScreen(
                 proParams = proParams,
                 proCaptureType = proCaptureType,
                 activeFilter = activeFilter,
-                isAudioMuted = runtime.isAudioMuted,
+                isRecording = isRecording,
+                isVideoFamilyActive = isVideoFamilyActive,
                 timelapseSpeed = timelapseSpeed,
                 slowMoOption = slowMoOption,
                 isMemeMode = isMemeMode,
-                onCycleHdr = { viewModel.cycleHdrMode() },
-                onToggleCameraAi = { viewModel.toggleCameraAiSuperSharp() },
-                onToggleMemeMode = { viewModel.setMemeCaptureMode(!isMemeMode) },
-                onCycleLiveDuration = { viewModel.cycleLiveDuration() },
-                onToggleNaturalBoost = {
-                    viewModel.updateSettings { it.copy(naturalColorBoostEnabled = !it.naturalColorBoostEnabled) }
-                    viewModel.performHapticTick()
-                },
-                onCycleAspectRatio = {
-                    if (!isVideoFamilyActive) viewModel.cycleAspectRatio()
-                },
-                onCycleSelfTimer = { viewModel.cycleSelfTimer() },
-                onCycleGrid = { viewModel.cycleGridType() },
-                onToggleLevel = {
-                    viewModel.updateSettings { it.copy(electronicLevelEnabled = !it.electronicLevelEnabled) }
-                    viewModel.performHapticTick()
-                },
-                onToggleLiveSound = {
-                    viewModel.updateSettings { it.copy(livePhotoSoundEnabled = !it.livePhotoSoundEnabled) }
-                    viewModel.performHapticTick()
-                },
-                onTogglePhotoResolution = {
-                    viewModel.updateSettings {
-                        val next = if (it.photoResolutionTier == PhotoResolutionTier.MAX) {
-                            PhotoResolutionTier.STANDARD
-                        } else {
-                            PhotoResolutionTier.MAX
-                        }
-                        it.copy(photoResolutionTier = next)
-                    }
-                    viewModel.performHapticTick()
-                },
-                onToggleWatermark = {
-                    viewModel.updateSettings { it.copy(cameraWatermarkEnabled = !it.cameraWatermarkEnabled) }
-                    viewModel.performHapticTick()
-                },
-                onCycleVideoRes = {
-                    val profiles = activeLens?.supportedVideoProfiles.orEmpty()
-                    if (profiles.isNotEmpty() && !runtime.isRecording) {
-                        val curIdx = profiles.indexOfFirst { it.resolution == settings.videoResolution }
-                        val nextProfile = profiles[(curIdx + 1) % profiles.size]
-                        val fps = if (settings.videoFps in nextProfile.supportedFps) settings.videoFps else nextProfile.supportedFps.first()
-                        viewModel.updateSettings { it.copy(videoResolution = nextProfile.resolution, videoFps = fps) }
-                        viewModel.performHapticTick()
-                    }
-                },
-                onCycleVideoFps = {
-                    val profile = activeLens?.supportedVideoProfiles.orEmpty()
-                        .firstOrNull { it.resolution == settings.videoResolution }
-                    val fpsList = profile?.supportedFps.orEmpty()
-                    if (fpsList.isNotEmpty() && !runtime.isRecording) {
-                        val idx = fpsList.indexOf(settings.videoFps)
-                        val nextFps = fpsList[(idx + 1) % fpsList.size]
-                        viewModel.updateSettings { it.copy(videoFps = nextFps) }
-                        viewModel.performHapticTick()
-                    }
-                },
-                onCycleStab = {
-                    val order = buildList {
-                        add(StabilizationMode.OFF)
-                        if (activeLens?.supportsOis == true) add(StabilizationMode.OIS)
-                        if (activeLens?.supportsEis == true) add(StabilizationMode.EIS)
-                        if (activeLens?.supportsOis == true && activeLens?.supportsEis == true) add(StabilizationMode.HYBRID)
-                    }
-                    val next = order[(order.indexOf(settings.stabilizationMode) + 1) % order.size]
-                    viewModel.updateSettings { it.copy(stabilizationMode = next) }
-                    viewModel.performHapticTick()
-                },
-                onCycleVideoBitrate = {
-                    val tiers = VideoBitrateTier.entries
-                    val next = tiers[(tiers.indexOf(settings.videoBitrateTier) + 1) % tiers.size]
-                    viewModel.updateSettings { it.copy(videoBitrateTier = next) }
-                    viewModel.performHapticTick()
-                },
-                onToggleMicMute = { viewModel.toggleRecordingMicMute() },
-                onCycleProCaptureType = {
-                    val next = if (proCaptureType == ProCaptureType.PHOTO) ProCaptureType.VIDEO else ProCaptureType.PHOTO
-                    viewModel.setProCaptureType(next)
-                },
-                onToggleProRaw = {
-                    viewModel.updateProParams { it.copy(captureRawDng = !it.captureRawDng) }
-                    viewModel.performHapticTick()
-                },
-                onToggleFocusPeaking = {
-                    viewModel.updateProParams { it.copy(focusPeakingEnabled = !it.focusPeakingEnabled) }
-                    viewModel.performHapticTick()
-                },
-                onToggleExposureWarning = {
-                    viewModel.updateProParams { it.copy(exposureWarningEnabled = !it.exposureWarningEnabled) }
-                    viewModel.performHapticTick()
-                },
-                onCycleSlowMo = {
-                    val options = activeLens?.supportedSlowMoModes.orEmpty()
-                    if (options.isNotEmpty()) {
-                        val idx = options.indexOf(slowMoOption)
-                        viewModel.setSlowMoOption(options[(idx + 1) % options.size])
-                    }
-                },
-                onCycleTimelapseSpeed = {
-                    val speeds = TimelapseSpeed.entries
-                    val idx = speeds.indexOf(timelapseSpeed)
-                    viewModel.setTimelapseSpeed(speeds[(idx + 1) % speeds.size])
-                },
+                activeModeColor = activeModeColor,
                 onOpenFilters = { showFilterStrip = true },
                 onDismiss = { showQuickGrid = false },
-                modeAccentColor = activeModeColor,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(bottom = 8.dp)
@@ -1091,93 +831,21 @@ fun CameraScreen(
                         }
                     }
 
-                    // Center Zoom Pill Bar (0.6 | 1x | 2 | 5)
+                    // Center Zoom Pill Bar (isolated recomposition scope so 60fps zoom never recomposes TextureView)
                     val zoomStops = remember(capabilities?.lenses, activeLens) {
                         HardwareCapabilityDetector.buildZoomStopPresets(
                             allLenses = capabilities?.lenses.orEmpty(),
                             activeLens = activeLens
                         )
                     }
-                    Row(
-                        modifier = Modifier
-                            .clip(CircleShape)
-                            .background(Color.Black.copy(alpha = 0.62f))
-                            .border(0.75.dp, HairlineBorder.copy(alpha = 0.7f), CircleShape)
-                            .padding(horizontal = 5.dp, vertical = 3.dp),
-                        horizontalArrangement = Arrangement.spacedBy(2.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        zoomStops.forEach { stop ->
-                            val sameBacking = activeLens?.cameraId == stop.backingLens.cameraId &&
-                                activeLens?.physicalId == stop.backingLens.physicalId
-                            val isSelected = sameBacking &&
-                                kotlin.math.abs(runtime.activeZoom - stop.targetZoomRatio) < 0.22f
-                            val pillScale by animateFloatAsState(
-                                targetValue = if (isSelected && animEnabled) 1.06f else 1f,
-                                animationSpec = if (animEnabled) HungCamMotion.bouncySpringFloat else tween(0),
-                                label = "zoomPillScale"
-                            )
-                            val pillBg by animateColorAsState(
-                                targetValue = if (isSelected) Color(0xCC2C2E36) else Color.Transparent,
-                                animationSpec = tween(160),
-                                label = "zoomPillBg"
-                            )
-                            val pillTextColor by animateColorAsState(
-                                targetValue = if (isSelected) accent else PureWhite.copy(alpha = 0.85f),
-                                animationSpec = tween(150),
-                                label = "zoomPillTextColor"
-                            )
-                            val stopInt = remember(stop.label) { MutableInteractionSource() }
-                            val compactLabel = if (isSelected) {
-                                String.format("%.1fx", runtime.activeZoom).replace(".0x", "x")
-                            } else {
-                                stop.label.removeSuffix("x")
-                            }
-                            Box(
-                                modifier = Modifier
-                                    .height(30.dp)
-                                    .springPressScale(stopInt, pressedScale = 0.86f, extraScale = pillScale)
-                                    .clip(CircleShape)
-                                    .background(pillBg)
-                                    .then(
-                                        if (isSelected) Modifier.border(1.dp, PureWhite.copy(alpha = 0.45f), CircleShape)
-                                        else Modifier
-                                    )
-                                    .clickable(interactionSource = stopInt, indication = null) {
-                                        if (isSelected) {
-                                            viewModel.performHapticTick()
-                                            showZoomSlider = !showZoomSlider
-                                        } else {
-                                            viewModel.selectZoomStop(stop)
-                                        }
-                                    }
-                                    .padding(horizontal = if (isSelected) 11.dp else 9.dp)
-                                    .testTag("lens_pill_${stop.label}"),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                AnimatedContent(
-                                    targetState = compactLabel,
-                                    transitionSpec = {
-                                        if (animEnabled) {
-                                            (fadeIn(tween(120)) + scaleIn(initialScale = 0.9f)) togetherWith fadeOut(tween(100))
-                                        } else {
-                                            fadeIn(tween(0)) togetherWith fadeOut(tween(0))
-                                        }
-                                    },
-                                    label = "zoomLabelFlip"
-                                ) { lbl ->
-                                    Text(
-                                        text = lbl,
-                                        style = MonoTelemetrySmall.copy(
-                                            fontSize = 11.sp,
-                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
-                                        ),
-                                        color = pillTextColor
-                                    )
-                                }
-                            }
-                        }
-                    }
+                    IsolatedZoomPillBar(
+                        viewModel = viewModel,
+                        activeLens = activeLens,
+                        zoomStops = zoomStops,
+                        accent = accent,
+                        animEnabled = animEnabled,
+                        onToggleZoomSlider = { showZoomSlider = !showZoomSlider }
+                    )
 
                     // Right Circular Leica & Filter Wand Toggle (icon highlight only, clean dark surface)
                     val filterInt = remember { MutableInteractionSource() }
@@ -1238,32 +906,13 @@ fun CameraScreen(
             verticalArrangement = Arrangement.spacedBy(6.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            AnimatedVisibility(
+            IsolatedZoomSliderBar(
+                viewModel = viewModel,
                 visible = showZoomSlider && activeLens != null,
-                enter = HungCamMotion.panelEnter(animEnabled) + expandVertically(),
-                exit = HungCamMotion.panelExit(animEnabled) + shrinkVertically()
-            ) {
-                activeLens?.let { lens ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth(0.92f)
-                            .clip(RoundedCornerShape(18.dp))
-                            .background(ElevatedObsidian)
-                            .border(0.6.dp, HairlineBorder, RoundedCornerShape(18.dp))
-                            .padding(horizontal = 14.dp, vertical = 2.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(String.format("%.1fx", runtime.activeZoom), style = MonoTelemetrySmall, color = accent)
-                        Slider(
-                            value = runtime.activeZoom.coerceIn(lens.minZoom, lens.maxZoom.coerceAtMost(10f)),
-                            onValueChange = { viewModel.cameraEngine.setZoomRatio(it) },
-                            valueRange = lens.minZoom..lens.maxZoom.coerceAtMost(10f).coerceAtLeast(lens.minZoom + 0.1f),
-                            colors = SliderDefaults.colors(thumbColor = accent, activeTrackColor = accent),
-                            modifier = Modifier.weight(1f).testTag("camera_zoom_slider")
-                        )
-                    }
-                }
-            }
+                activeLens = activeLens,
+                accent = accent,
+                animEnabled = animEnabled
+            )
 
             AnimatedVisibility(
                 visible = mode == CameraMode.PRO && showProControlDeck,
@@ -1321,7 +970,7 @@ fun CameraScreen(
                 activeFilter = activeFilter,
                 filterIntensity = filterIntensity,
                 naturalBoostEnabled = settings.naturalColorBoostEnabled,
-                isRecording = runtime.isRecording,
+                isRecording = isRecording,
                 onSelectFilter = { viewModel.setCameraFilter(it) },
                 onChangeIntensity = { viewModel.setCameraFilterIntensity(it) },
                 onToggleNaturalBoost = {
@@ -1336,13 +985,13 @@ fun CameraScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(PureBlack)
-                .pointerInput(runtime.isRecording) {
+                .pointerInput(isRecording) {
                     var dragSum = 0f
                     detectVerticalDragGestures(
                         onDragStart = { dragSum = 0f },
                         onVerticalDrag = { _, dragAmount ->
                             dragSum += dragAmount
-                            if (dragSum < -48f && !runtime.isRecording) {
+                            if (dragSum < -48f && !isRecording) {
                                 showMoreModesPanel = true
                             } else if (dragSum > 48f) {
                                 showMoreModesPanel = false
@@ -1361,7 +1010,7 @@ fun CameraScreen(
                     .height(3.5.dp)
                     .clip(CircleShape)
                     .background(MutedSlate.copy(alpha = 0.45f))
-                    .clickable(enabled = !runtime.isRecording) {
+                    .clickable(enabled = !isRecording) {
                         showMoreModesPanel = !showMoreModesPanel
                     }
             )
@@ -1534,7 +1183,7 @@ fun CameraScreen(
                             color = morePillBorder,
                             shape = RoundedCornerShape(18.dp)
                         )
-                        .clickable(interactionSource = moreInteraction, indication = null, enabled = !runtime.isRecording) {
+                        .clickable(interactionSource = moreInteraction, indication = null, enabled = !isRecording) {
                             showMoreModesPanel = !showMoreModesPanel
                         }
                         .padding(horizontal = if (moreActive || isMulticolorMode) 12.dp else 10.dp)
@@ -1560,193 +1209,17 @@ fun CameraScreen(
                 }
             }
 
-            // Concentric Flagship Shutter Row (Gallery Thumbnail | Concentric Shutter | Flip Camera)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 32.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                if (runtime.isRecording) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        SpringIconButton(
-                            onClick = { viewModel.cameraEngine.pauseOrResumeVideoRecording() },
-                            modifier = Modifier
-                                .size(48.dp)
-                                .background(ElevatedObsidian, CircleShape)
-                                .border(0.75.dp, HairlineBorder, CircleShape)
-                                .testTag("video_pause_resume_button")
-                        ) {
-                            Icon(
-                                imageVector = if (runtime.isRecordingPaused) Icons.Default.PlayArrow else Icons.Default.Pause,
-                                contentDescription = "Tạm dừng / Tiếp tục quay",
-                                tint = PureWhite
-                            )
-                        }
-                        SpringIconButton(
-                            onClick = { viewModel.toggleRecordingMicMute() },
-                            modifier = Modifier
-                                .size(48.dp)
-                                .background(ElevatedObsidian, CircleShape)
-                                .border(0.75.dp, HairlineBorder, CircleShape)
-                                .testTag("video_mute_button")
-                        ) {
-                            Icon(
-                                imageVector = if (runtime.isAudioMuted) Icons.Default.MicOff else Icons.Default.Mic,
-                                contentDescription = "Tắt / Mở Mic",
-                                tint = if (runtime.isAudioMuted) CrimsonShutter else PureWhite
-                            )
-                        }
-                    }
-                } else {
-                    val latest = assets.firstOrNull()
-                    val thumbInteraction = remember { MutableInteractionSource() }
-                    Box(
-                        modifier = Modifier
-                            .size(48.dp)
-                            .springPressScale(thumbInteraction, pressedScale = 0.88f)
-                            .clip(CircleShape)
-                            .background(ElevatedObsidian)
-                            .border(1.5.dp, PureWhite.copy(alpha = 0.25f), CircleShape)
-                            .clickable(interactionSource = thumbInteraction, indication = null, onClick = onOpenGallery)
-                            .testTag("camera_thumbnail_button"),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        if (latest != null) {
-                            val thumbRequest = remember(latest.mediaStoreUri, context) {
-                                coil.request.ImageRequest.Builder(context)
-                                    .data(latest.mediaStoreUri)
-                                    .size(160)
-                                    .precision(coil.size.Precision.INEXACT)
-                                    .bitmapConfig(android.graphics.Bitmap.Config.RGB_565)
-                                    .build()
-                            }
-                            AsyncImage(
-                                model = thumbRequest,
-                                contentDescription = "Mở Thư viện",
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier.fillMaxSize()
-                            )
-                        } else {
-                            Icon(
-                                imageVector = Icons.Default.PhotoLibrary,
-                                contentDescription = "Mở Thư viện",
-                                tint = PureWhite.copy(alpha = 0.85f),
-                                modifier = Modifier.size(22.dp)
-                            )
-                        }
-                    }
-                }
-
-                // Center Double-Ring Flagship Shutter Button with 60fps shape morph + Live Photo progress arc
-                val shutterScale by animateFloatAsState(
-                    targetValue = if (runtime.isCapturing && animEnabled) 0.85f else 1f,
-                    animationSpec = if (animEnabled) HungCamMotion.bouncySpringFloat else tween(0),
-                    label = "shutterScale"
-                )
-                val innerCornerRadius by animateDpAsState(
-                    targetValue = if (runtime.isRecording) 10.dp else 32.dp,
-                    animationSpec = if (animEnabled) spring(dampingRatio = 0.82f, stiffness = 480f) else tween(0),
-                    label = "shutterInnerCorner"
-                )
-                val innerInsetPad by animateDpAsState(
-                    targetValue = if (runtime.isRecording) 20.dp else 6.dp,
-                    animationSpec = if (animEnabled) spring(dampingRatio = 0.82f, stiffness = 480f) else tween(0),
-                    label = "shutterInnerPad"
-                )
-                val shutterOuterColor by animateColorAsState(
-                    targetValue = when {
-                        runtime.isRecording -> CrimsonShutter
-                        runtime.livePhotoCaptureProgress != null -> accent
-                        else -> PureWhite
-                    },
-                    animationSpec = tween(180),
-                    label = "shutterOuterColor"
-                )
-                val shutterCoreColor by animateColorAsState(
-                    targetValue = if (runtime.isRecording || isVideoFamilyActive) CrimsonShutter else PureWhite,
-                    animationSpec = tween(180),
-                    label = "shutterCoreColor"
-                )
-                val liveArcSweep by animateFloatAsState(
-                    targetValue = (runtime.livePhotoCaptureProgress ?: 0f) * 360f,
-                    animationSpec = tween(60, easing = FastOutSlowInEasing),
-                    label = "shutterLiveSweep"
-                )
-                Box(
-                    modifier = Modifier
-                        .size(78.dp)
-                        .graphicsLayer {
-                            scaleX = shutterScale
-                            scaleY = shutterScale
-                        }
-                        .pointerInput(mode, proCaptureType, runtime.isRecording) {
-                            detectTapGestures(
-                                onTap = {
-                                    if (!isVideoFamilyActive) shutterFlashTrigger += 1
-                                    viewModel.triggerShutterAction()
-                                },
-                                onLongPress = {
-                                    if ((mode == CameraMode.PHOTO || mode == CameraMode.PRO) && !isVideoFamilyActive) {
-                                        viewModel.startBurstCapture()
-                                    }
-                                },
-                                onPress = {
-                                    tryAwaitRelease()
-                                    viewModel.stopBurstCapture()
-                                }
-                            )
-                        }
-                        .testTag("camera_shutter_button"),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(1.dp)
-                            .clip(CircleShape)
-                            .border(
-                                width = 3.2.dp,
-                                color = shutterOuterColor,
-                                shape = CircleShape
-                            )
-                            .padding(innerInsetPad)
-                            .clip(RoundedCornerShape(innerCornerRadius))
-                            .background(shutterCoreColor)
-                    )
-                    if (runtime.livePhotoCaptureProgress != null) {
-                        Canvas(modifier = Modifier.fillMaxSize()) {
-                            val stroke = 3.5.dp.toPx()
-                            drawArc(
-                                color = CrimsonShutter,
-                                startAngle = -90f,
-                                sweepAngle = liveArcSweep,
-                                useCenter = false,
-                                style = Stroke(width = stroke, cap = StrokeCap.Round)
-                            )
-                        }
-                    }
-                }
-
-                // Right Circular Camera Flip Button
-                SpringIconButton(
-                    onClick = { viewModel.flipFrontBackCamera() },
-                    enabled = !runtime.isRecording,
-                    modifier = Modifier
-                        .size(48.dp)
-                        .background(Color(0xFF181A20), CircleShape)
-                        .border(0.75.dp, HairlineBorder.copy(alpha = 0.55f), CircleShape)
-                        .testTag("camera_flip_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Cameraswitch,
-                        contentDescription = "Đổi camera trước/sau",
-                        tint = if (runtime.isRecording) MutedSlate else PureWhite,
-                        modifier = Modifier.size(22.dp)
-                    )
-                }
-            }
+            // Concentric Flagship Shutter Row (isolated recomposition scope)
+            IsolatedShutterDockRow(
+                viewModel = viewModel,
+                mode = mode,
+                proCaptureType = proCaptureType,
+                isVideoFamilyActive = isVideoFamilyActive,
+                accent = accent,
+                animEnabled = animEnabled,
+                onOpenGallery = onOpenGallery,
+                onTriggerTapFlash = { shutterFlashTrigger += 1 }
+            )
         }
     }
 
@@ -1877,4 +1350,744 @@ private fun IsolatedProControlDeck(
         liveExposureNs = telemetry.activeExposureNs,
         onUpdate = onUpdate
     )
+}
+
+@Composable
+private fun IsolatedShutterFlashOverlay(
+    viewModel: MainViewModel,
+    tapTriggerCount: Int
+) {
+    val isCapturing by remember(viewModel) {
+        viewModel.cameraRuntime.map { it.isCapturing }.distinctUntilChanged()
+    }.collectAsStateWithLifecycle(initialValue = false)
+    var captureTrigger by remember { mutableStateOf(0) }
+    var wasCapturing by remember { mutableStateOf(false) }
+
+    LaunchedEffect(isCapturing) {
+        if (isCapturing && !wasCapturing) {
+            captureTrigger += 1
+        }
+        wasCapturing = isCapturing
+    }
+
+    ShutterFlashOverlay(triggerCount = tapTriggerCount + captureTrigger)
+}
+
+private data class TopRightUiState(
+    val isRecording: Boolean = false,
+    val recordingSeconds: Int = 0,
+    val activeZoom: Float = 1f
+)
+
+@Composable
+private fun IsolatedTopRightTelemetryAndSettings(
+    viewModel: MainViewModel,
+    activeLens: com.example.model.CameraLensInfo?,
+    selfTimer: com.example.model.SelfTimerDuration,
+    activeFilter: PhotoFilterPreset,
+    accent: Color,
+    onClickTelemetry: () -> Unit,
+    onOpenSettings: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val topRightState by remember(viewModel) {
+        viewModel.cameraRuntime
+            .map {
+                TopRightUiState(
+                    isRecording = it.isRecording,
+                    recordingSeconds = if (it.isRecording) (it.recordingElapsedMs / 1000L).toInt() else 0,
+                    activeZoom = (it.activeZoom * 10f).toInt() / 10f
+                )
+            }
+            .distinctUntilChanged()
+    }.collectAsStateWithLifecycle(initialValue = TopRightUiState())
+
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        if (topRightState.isRecording) {
+            val secs = topRightState.recordingSeconds
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(CrimsonShutter)
+                    .padding(horizontal = 9.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp)
+            ) {
+                Box(modifier = Modifier.size(6.dp).background(PureWhite, CircleShape))
+                Text(
+                    text = String.format("%02d:%02d", secs / 60, secs % 60),
+                    style = MonoTelemetryLarge.copy(fontSize = 12.sp),
+                    color = PureWhite
+                )
+            }
+        } else {
+            if (selfTimer != com.example.model.SelfTimerDuration.OFF) {
+                Text(
+                    text = selfTimer.label,
+                    style = MonoTelemetrySmall.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold),
+                    color = accent
+                )
+            }
+            val opticLabel = activeLens?.let { lens ->
+                val mm = (lens.equivalentFocalLengthMm * topRightState.activeZoom).toInt().coerceAtLeast(10)
+                "${mm}mm"
+            } ?: "LEICA"
+            Text(
+                text = if (activeFilter != PhotoFilterPreset.NATURAL) activeFilter.label else opticLabel,
+                style = MonoTelemetrySmall.copy(fontSize = 10.sp, fontWeight = FontWeight.SemiBold),
+                color = if (activeFilter != PhotoFilterPreset.NATURAL) accent else MutedSlate,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .widthIn(max = 72.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .clickable(onClick = onClickTelemetry)
+                    .padding(horizontal = 5.dp, vertical = 4.dp)
+            )
+            SpringIconButton(
+                onClick = {
+                    viewModel.performHapticTick()
+                    onOpenSettings()
+                },
+                modifier = Modifier
+                    .size(36.dp)
+                    .clip(CircleShape)
+                    .background(Color(0xFF181A20))
+                    .border(0.6.dp, HairlineBorder, CircleShape)
+                    .testTag("camera_top_settings_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Settings,
+                    contentDescription = "Cài đặt Camera",
+                    tint = PureWhite,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun IsolatedViewfinderBanners(
+    viewModel: MainViewModel,
+    animEnabled: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val runtime by viewModel.cameraRuntime.collectAsStateWithLifecycle()
+
+    LaunchedEffect(runtime.statusBanner, runtime.errorMessage) {
+        if (runtime.statusBanner != null || runtime.errorMessage != null) {
+            delay(2800L)
+            viewModel.cameraEngine.clearStatusMessages()
+        }
+    }
+
+    Box(modifier = modifier) {
+        OverlayAnimatedVisibility(
+            visible = runtime.livePhotoCaptureProgress != null && runtime.livePhotoDurationSec > 0,
+            enter = if (animEnabled) fadeIn(tween(160)) + slideInVertically { -it / 2 } else fadeIn(tween(0)),
+            exit = if (animEnabled) fadeOut(tween(150)) + slideOutVertically { -it / 2 } else fadeOut(tween(0))
+        ) {
+            LivePhotoCaptureProgressPill(
+                progress = runtime.livePhotoCaptureProgress ?: 0f,
+                durationSec = runtime.livePhotoDurationSec.coerceAtLeast(2)
+            )
+        }
+
+        OverlayAnimatedVisibility(
+            visible = (runtime.statusBanner != null || runtime.errorMessage != null) &&
+                runtime.livePhotoCaptureProgress == null,
+            enter = if (animEnabled) fadeIn(tween(180)) + slideInVertically { -it / 2 } else fadeIn(tween(0)),
+            exit = if (animEnabled) fadeOut(tween(150)) + slideOutVertically { -it / 2 } else fadeOut(tween(0))
+        ) {
+            val isErr = runtime.errorMessage != null
+            Text(
+                text = runtime.errorMessage ?: runtime.statusBanner.orEmpty(),
+                style = MonoTelemetrySmall,
+                color = PureWhite,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(if (isErr) CrimsonShutter.copy(alpha = 0.88f) else Color.Black.copy(alpha = 0.72f))
+                    .border(0.6.dp, HairlineBorder, RoundedCornerShape(14.dp))
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun IsolatedMemeModeBanner(
+    viewModel: MainViewModel,
+    visible: Boolean,
+    accent: Color,
+    animEnabled: Boolean,
+    onOpenStickersMeme: (MediaAssetEntity) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val assets by viewModel.activeAssets.collectAsStateWithLifecycle()
+    val latestPhoto = remember(assets) {
+        assets.firstOrNull { it.typeEnum != MediaItemType.VIDEO }
+    }
+    Box(modifier = modifier) {
+        OverlayAnimatedVisibility(
+            visible = visible,
+            enter = if (animEnabled) fadeIn(tween(180)) + slideInVertically { -it / 2 } else fadeIn(tween(0)),
+            exit = if (animEnabled) fadeOut(tween(140)) + slideOutVertically { -it / 2 } else fadeOut(tween(0))
+        ) {
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(Color(0xD9101216))
+                    .border(1.dp, accent, RoundedCornerShape(16.dp))
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                    .testTag("camera_meme_mode_banner"),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "MEME • Chụp để ghép Sticker & Chữ",
+                    style = MonoTelemetrySmall.copy(fontSize = 11.sp, fontWeight = FontWeight.Bold),
+                    color = PureWhite
+                )
+                if (latestPhoto != null) {
+                    Text(
+                        text = "Ảnh cũ",
+                        style = MonoTelemetrySmall.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold),
+                        color = accent,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(accent.copy(alpha = 0.16f))
+                            .clickable {
+                                viewModel.setMemeCaptureMode(false)
+                                onOpenStickersMeme(latestPhoto)
+                            }
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Thoát chế độ Meme",
+                    tint = MutedSlate,
+                    modifier = Modifier
+                        .size(16.dp)
+                        .clickable { viewModel.setMemeCaptureMode(false) }
+                        .testTag("camera_meme_mode_close")
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun IsolatedQuickControlGrid(
+    viewModel: MainViewModel,
+    visible: Boolean,
+    mode: CameraMode,
+    settings: com.example.data.HungCamSettings,
+    activeLens: com.example.model.CameraLensInfo?,
+    liveDuration: LivePhotoDuration,
+    selfTimer: com.example.model.SelfTimerDuration,
+    proParams: com.example.model.ProCameraParameters,
+    proCaptureType: ProCaptureType,
+    activeFilter: PhotoFilterPreset,
+    isRecording: Boolean,
+    isVideoFamilyActive: Boolean,
+    timelapseSpeed: TimelapseSpeed,
+    slowMoOption: com.example.model.SlowMoOption?,
+    isMemeMode: Boolean,
+    activeModeColor: Color,
+    onOpenFilters: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val isAudioMuted by remember(viewModel) {
+        viewModel.cameraRuntime.map { it.isAudioMuted }.distinctUntilChanged()
+    }.collectAsStateWithLifecycle(initialValue = false)
+
+    ModeQuickControlGrid(
+        visible = visible,
+        mode = mode,
+        settings = settings,
+        activeLens = activeLens,
+        liveDuration = liveDuration,
+        selfTimer = selfTimer,
+        proParams = proParams,
+        proCaptureType = proCaptureType,
+        activeFilter = activeFilter,
+        isAudioMuted = isAudioMuted,
+        timelapseSpeed = timelapseSpeed,
+        slowMoOption = slowMoOption,
+        isMemeMode = isMemeMode,
+        onCycleHdr = { viewModel.cycleHdrMode() },
+        onToggleCameraAi = { viewModel.toggleCameraAiSuperSharp() },
+        onToggleMemeMode = { viewModel.setMemeCaptureMode(!isMemeMode) },
+        onCycleLiveDuration = { viewModel.cycleLiveDuration() },
+        onToggleNaturalBoost = {
+            viewModel.updateSettings { it.copy(naturalColorBoostEnabled = !it.naturalColorBoostEnabled) }
+            viewModel.performHapticTick()
+        },
+        onCycleAspectRatio = {
+            if (!isVideoFamilyActive) viewModel.cycleAspectRatio()
+        },
+        onCycleSelfTimer = { viewModel.cycleSelfTimer() },
+        onCycleGrid = { viewModel.cycleGridType() },
+        onToggleLevel = {
+            viewModel.updateSettings { it.copy(electronicLevelEnabled = !it.electronicLevelEnabled) }
+            viewModel.performHapticTick()
+        },
+        onToggleLiveSound = {
+            viewModel.updateSettings { it.copy(livePhotoSoundEnabled = !it.livePhotoSoundEnabled) }
+            viewModel.performHapticTick()
+        },
+        onTogglePhotoResolution = {
+            viewModel.updateSettings {
+                val next = if (it.photoResolutionTier == PhotoResolutionTier.MAX) {
+                    PhotoResolutionTier.STANDARD
+                } else {
+                    PhotoResolutionTier.MAX
+                }
+                it.copy(photoResolutionTier = next)
+            }
+            viewModel.performHapticTick()
+        },
+        onToggleWatermark = {
+            viewModel.updateSettings { it.copy(cameraWatermarkEnabled = !it.cameraWatermarkEnabled) }
+            viewModel.performHapticTick()
+        },
+        onCycleVideoRes = {
+            val profiles = activeLens?.supportedVideoProfiles.orEmpty()
+            if (profiles.isNotEmpty() && !isRecording) {
+                val curIdx = profiles.indexOfFirst { it.resolution == settings.videoResolution }
+                val nextProfile = profiles[(curIdx + 1) % profiles.size]
+                val fps = if (settings.videoFps in nextProfile.supportedFps) settings.videoFps else nextProfile.supportedFps.first()
+                viewModel.updateSettings { it.copy(videoResolution = nextProfile.resolution, videoFps = fps) }
+                viewModel.performHapticTick()
+            }
+        },
+        onCycleVideoFps = {
+            val profile = activeLens?.supportedVideoProfiles.orEmpty()
+                .firstOrNull { it.resolution == settings.videoResolution }
+            val fpsList = profile?.supportedFps.orEmpty()
+            if (fpsList.isNotEmpty() && !isRecording) {
+                val idx = fpsList.indexOf(settings.videoFps)
+                val nextFps = fpsList[(idx + 1) % fpsList.size]
+                viewModel.updateSettings { it.copy(videoFps = nextFps) }
+                viewModel.performHapticTick()
+            }
+        },
+        onCycleStab = {
+            val order = buildList {
+                add(StabilizationMode.OFF)
+                if (activeLens?.supportsOis == true) add(StabilizationMode.OIS)
+                if (activeLens?.supportsEis == true) add(StabilizationMode.EIS)
+                if (activeLens?.supportsOis == true && activeLens?.supportsEis == true) add(StabilizationMode.HYBRID)
+            }
+            val next = order[(order.indexOf(settings.stabilizationMode) + 1) % order.size]
+            viewModel.updateSettings { it.copy(stabilizationMode = next) }
+            viewModel.performHapticTick()
+        },
+        onCycleVideoBitrate = {
+            val tiers = VideoBitrateTier.entries
+            val next = tiers[(tiers.indexOf(settings.videoBitrateTier) + 1) % tiers.size]
+            viewModel.updateSettings { it.copy(videoBitrateTier = next) }
+            viewModel.performHapticTick()
+        },
+        onToggleMicMute = { viewModel.toggleRecordingMicMute() },
+        onCycleProCaptureType = {
+            val next = if (proCaptureType == ProCaptureType.PHOTO) ProCaptureType.VIDEO else ProCaptureType.PHOTO
+            viewModel.setProCaptureType(next)
+        },
+        onToggleProRaw = {
+            viewModel.updateProParams { it.copy(captureRawDng = !it.captureRawDng) }
+            viewModel.performHapticTick()
+        },
+        onToggleFocusPeaking = {
+            viewModel.updateProParams { it.copy(focusPeakingEnabled = !it.focusPeakingEnabled) }
+            viewModel.performHapticTick()
+        },
+        onToggleExposureWarning = {
+            viewModel.updateProParams { it.copy(exposureWarningEnabled = !it.exposureWarningEnabled) }
+            viewModel.performHapticTick()
+        },
+        onCycleSlowMo = {
+            val options = activeLens?.supportedSlowMoModes.orEmpty()
+            if (options.isNotEmpty()) {
+                val idx = options.indexOf(slowMoOption)
+                viewModel.setSlowMoOption(options[(idx + 1) % options.size])
+            }
+        },
+        onCycleTimelapseSpeed = {
+            val speeds = TimelapseSpeed.entries
+            val idx = speeds.indexOf(timelapseSpeed)
+            viewModel.setTimelapseSpeed(speeds[(idx + 1) % speeds.size])
+        },
+        onOpenFilters = onOpenFilters,
+        onDismiss = onDismiss,
+        modeAccentColor = activeModeColor,
+        modifier = modifier
+    )
+}
+
+@Composable
+private fun IsolatedZoomPillBar(
+    viewModel: MainViewModel,
+    activeLens: com.example.model.CameraLensInfo?,
+    zoomStops: List<com.example.model.ZoomStopPreset>,
+    accent: Color,
+    animEnabled: Boolean,
+    onToggleZoomSlider: () -> Unit
+) {
+    val activeZoom by remember(viewModel) {
+        viewModel.cameraRuntime.map { it.activeZoom }.distinctUntilChanged()
+    }.collectAsStateWithLifecycle(initialValue = 1.0f)
+
+    Row(
+        modifier = Modifier
+            .clip(CircleShape)
+            .background(Color.Black.copy(alpha = 0.62f))
+            .border(0.75.dp, HairlineBorder.copy(alpha = 0.7f), CircleShape)
+            .padding(horizontal = 5.dp, vertical = 3.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        zoomStops.forEach { stop ->
+            val sameBacking = activeLens?.cameraId == stop.backingLens.cameraId &&
+                activeLens?.physicalId == stop.backingLens.physicalId
+            val isSelected = sameBacking &&
+                kotlin.math.abs(activeZoom - stop.targetZoomRatio) < 0.22f
+            val pillScale by animateFloatAsState(
+                targetValue = if (isSelected && animEnabled) 1.06f else 1f,
+                animationSpec = if (animEnabled) HungCamMotion.bouncySpringFloat else tween(0),
+                label = "zoomPillScale"
+            )
+            val pillBg by animateColorAsState(
+                targetValue = if (isSelected) Color(0xCC2C2E36) else Color.Transparent,
+                animationSpec = tween(160),
+                label = "zoomPillBg"
+            )
+            val pillTextColor by animateColorAsState(
+                targetValue = if (isSelected) accent else PureWhite.copy(alpha = 0.85f),
+                animationSpec = tween(150),
+                label = "zoomPillTextColor"
+            )
+            val stopInt = remember(stop.label) { MutableInteractionSource() }
+            val compactLabel = if (isSelected) {
+                String.format("%.1fx", activeZoom).replace(".0x", "x")
+            } else {
+                stop.label.removeSuffix("x")
+            }
+            Box(
+                modifier = Modifier
+                    .height(30.dp)
+                    .springPressScale(stopInt, pressedScale = 0.86f, extraScale = pillScale)
+                    .clip(CircleShape)
+                    .background(pillBg)
+                    .then(
+                        if (isSelected) Modifier.border(1.dp, PureWhite.copy(alpha = 0.45f), CircleShape)
+                        else Modifier
+                    )
+                    .clickable(interactionSource = stopInt, indication = null) {
+                        if (isSelected) {
+                            viewModel.performHapticTick()
+                            onToggleZoomSlider()
+                        } else {
+                            viewModel.selectZoomStop(stop)
+                        }
+                    }
+                    .padding(horizontal = if (isSelected) 11.dp else 9.dp)
+                    .testTag("lens_pill_${stop.label}"),
+                contentAlignment = Alignment.Center
+            ) {
+                AnimatedContent(
+                    targetState = compactLabel,
+                    transitionSpec = {
+                        if (animEnabled) {
+                            (fadeIn(tween(120)) + scaleIn(initialScale = 0.9f)) togetherWith fadeOut(tween(100))
+                        } else {
+                            fadeIn(tween(0)) togetherWith fadeOut(tween(0))
+                        }
+                    },
+                    label = "zoomLabelFlip"
+                ) { lbl ->
+                    Text(
+                        text = lbl,
+                        style = MonoTelemetrySmall.copy(
+                            fontSize = 11.sp,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                        ),
+                        color = pillTextColor
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun IsolatedZoomSliderBar(
+    viewModel: MainViewModel,
+    visible: Boolean,
+    activeLens: com.example.model.CameraLensInfo?,
+    accent: Color,
+    animEnabled: Boolean
+) {
+    AnimatedVisibility(
+        visible = visible && activeLens != null,
+        enter = HungCamMotion.panelEnter(animEnabled) + expandVertically(),
+        exit = HungCamMotion.panelExit(animEnabled) + shrinkVertically()
+    ) {
+        activeLens?.let { lens ->
+            val activeZoom by remember(viewModel) {
+                viewModel.cameraRuntime.map { it.activeZoom }.distinctUntilChanged()
+            }.collectAsStateWithLifecycle(initialValue = 1.0f)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth(0.92f)
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(ElevatedObsidian)
+                    .border(0.6.dp, HairlineBorder, RoundedCornerShape(18.dp))
+                    .padding(horizontal = 14.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(String.format("%.1fx", activeZoom), style = MonoTelemetrySmall, color = accent)
+                Slider(
+                    value = activeZoom.coerceIn(lens.minZoom, lens.maxZoom.coerceAtMost(10f)),
+                    onValueChange = { viewModel.cameraEngine.setZoomRatio(it) },
+                    valueRange = lens.minZoom..lens.maxZoom.coerceAtMost(10f).coerceAtLeast(lens.minZoom + 0.1f),
+                    colors = SliderDefaults.colors(thumbColor = accent, activeTrackColor = accent),
+                    modifier = Modifier.weight(1f).testTag("camera_zoom_slider")
+                )
+            }
+        }
+    }
+}
+
+private data class ShutterDockUiState(
+    val isRecording: Boolean = false,
+    val isRecordingPaused: Boolean = false,
+    val isAudioMuted: Boolean = false,
+    val isCapturing: Boolean = false,
+    val livePhotoCaptureProgress: Float? = null
+)
+
+@Composable
+private fun IsolatedShutterDockRow(
+    viewModel: MainViewModel,
+    mode: CameraMode,
+    proCaptureType: ProCaptureType,
+    isVideoFamilyActive: Boolean,
+    accent: Color,
+    animEnabled: Boolean,
+    onOpenGallery: () -> Unit,
+    onTriggerTapFlash: () -> Unit
+) {
+    val context = LocalContext.current
+    val dockState by remember(viewModel) {
+        viewModel.cameraRuntime
+            .map {
+                ShutterDockUiState(
+                    isRecording = it.isRecording,
+                    isRecordingPaused = it.isRecordingPaused,
+                    isAudioMuted = it.isAudioMuted,
+                    isCapturing = it.isCapturing,
+                    livePhotoCaptureProgress = it.livePhotoCaptureProgress
+                )
+            }
+            .distinctUntilChanged()
+    }.collectAsStateWithLifecycle(initialValue = ShutterDockUiState())
+    val latestThumbUri by remember(viewModel) {
+        viewModel.activeAssets
+            .map { it.firstOrNull()?.mediaStoreUri }
+            .distinctUntilChanged()
+    }.collectAsStateWithLifecycle(initialValue = null)
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 32.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (dockState.isRecording) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SpringIconButton(
+                    onClick = { viewModel.cameraEngine.pauseOrResumeVideoRecording() },
+                    modifier = Modifier
+                        .size(48.dp)
+                        .background(ElevatedObsidian, CircleShape)
+                        .border(0.75.dp, HairlineBorder, CircleShape)
+                        .testTag("video_pause_resume_button")
+                ) {
+                    Icon(
+                        imageVector = if (dockState.isRecordingPaused) Icons.Default.PlayArrow else Icons.Default.Pause,
+                        contentDescription = "Tạm dừng / Tiếp tục quay",
+                        tint = PureWhite
+                    )
+                }
+                SpringIconButton(
+                    onClick = { viewModel.toggleRecordingMicMute() },
+                    modifier = Modifier
+                        .size(48.dp)
+                        .background(ElevatedObsidian, CircleShape)
+                        .border(0.75.dp, HairlineBorder, CircleShape)
+                        .testTag("video_mute_button")
+                ) {
+                    Icon(
+                        imageVector = if (dockState.isAudioMuted) Icons.Default.MicOff else Icons.Default.Mic,
+                        contentDescription = "Tắt / Mở Mic",
+                        tint = if (dockState.isAudioMuted) CrimsonShutter else PureWhite
+                    )
+                }
+            }
+        } else {
+            val thumbInteraction = remember { MutableInteractionSource() }
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .springPressScale(thumbInteraction, pressedScale = 0.88f)
+                    .clip(CircleShape)
+                    .background(ElevatedObsidian)
+                    .border(1.5.dp, PureWhite.copy(alpha = 0.25f), CircleShape)
+                    .clickable(interactionSource = thumbInteraction, indication = null, onClick = onOpenGallery)
+                    .testTag("camera_thumbnail_button"),
+                contentAlignment = Alignment.Center
+            ) {
+                if (latestThumbUri != null) {
+                    val thumbRequest = remember(latestThumbUri, context) {
+                        coil.request.ImageRequest.Builder(context)
+                            .data(latestThumbUri)
+                            .size(160)
+                            .precision(coil.size.Precision.INEXACT)
+                            .bitmapConfig(android.graphics.Bitmap.Config.RGB_565)
+                            .build()
+                    }
+                    AsyncImage(
+                        model = thumbRequest,
+                        contentDescription = "Mở Thư viện",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.Default.PhotoLibrary,
+                        contentDescription = "Mở Thư viện",
+                        tint = PureWhite.copy(alpha = 0.85f),
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+            }
+        }
+
+        // Center Double-Ring Flagship Shutter Button with 60fps shape morph + Live Photo progress arc
+        val shutterScale by animateFloatAsState(
+            targetValue = if (dockState.isCapturing && animEnabled) 0.85f else 1f,
+            animationSpec = if (animEnabled) HungCamMotion.bouncySpringFloat else tween(0),
+            label = "shutterScale"
+        )
+        val innerCornerRadius by animateDpAsState(
+            targetValue = if (dockState.isRecording) 10.dp else 32.dp,
+            animationSpec = if (animEnabled) spring(dampingRatio = 0.82f, stiffness = 480f) else tween(0),
+            label = "shutterInnerCorner"
+        )
+        val innerInsetPad by animateDpAsState(
+            targetValue = if (dockState.isRecording) 20.dp else 6.dp,
+            animationSpec = if (animEnabled) spring(dampingRatio = 0.82f, stiffness = 480f) else tween(0),
+            label = "shutterInnerPad"
+        )
+        val shutterOuterColor by animateColorAsState(
+            targetValue = when {
+                dockState.isRecording -> CrimsonShutter
+                dockState.livePhotoCaptureProgress != null -> accent
+                else -> PureWhite
+            },
+            animationSpec = tween(180),
+            label = "shutterOuterColor"
+        )
+        val shutterCoreColor by animateColorAsState(
+            targetValue = if (dockState.isRecording || isVideoFamilyActive) CrimsonShutter else PureWhite,
+            animationSpec = tween(180),
+            label = "shutterCoreColor"
+        )
+        val liveArcSweep by animateFloatAsState(
+            targetValue = (dockState.livePhotoCaptureProgress ?: 0f) * 360f,
+            animationSpec = tween(60, easing = FastOutSlowInEasing),
+            label = "shutterLiveSweep"
+        )
+        Box(
+            modifier = Modifier
+                .size(78.dp)
+                .graphicsLayer {
+                    scaleX = shutterScale
+                    scaleY = shutterScale
+                }
+                .pointerInput(mode, proCaptureType, dockState.isRecording) {
+                    detectTapGestures(
+                        onTap = {
+                            if (!isVideoFamilyActive) onTriggerTapFlash()
+                            viewModel.triggerShutterAction()
+                        },
+                        onLongPress = {
+                            if ((mode == CameraMode.PHOTO || mode == CameraMode.PRO) && !isVideoFamilyActive) {
+                                viewModel.startBurstCapture()
+                            }
+                        },
+                        onPress = {
+                            tryAwaitRelease()
+                            viewModel.stopBurstCapture()
+                        }
+                    )
+                }
+                .testTag("camera_shutter_button"),
+            contentAlignment = Alignment.Center
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(1.dp)
+                    .clip(CircleShape)
+                    .border(
+                        width = 3.2.dp,
+                        color = shutterOuterColor,
+                        shape = CircleShape
+                    )
+                    .padding(innerInsetPad)
+                    .clip(RoundedCornerShape(innerCornerRadius))
+                    .background(shutterCoreColor)
+            )
+            if (dockState.livePhotoCaptureProgress != null) {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val stroke = 3.5.dp.toPx()
+                    drawArc(
+                        color = CrimsonShutter,
+                        startAngle = -90f,
+                        sweepAngle = liveArcSweep,
+                        useCenter = false,
+                        style = Stroke(width = stroke, cap = StrokeCap.Round)
+                    )
+                }
+            }
+        }
+
+        // Right Circular Camera Flip Button
+        SpringIconButton(
+            onClick = { viewModel.flipFrontBackCamera() },
+            enabled = !dockState.isRecording,
+            modifier = Modifier
+                .size(48.dp)
+                .background(Color(0xFF181A20), CircleShape)
+                .border(0.75.dp, HairlineBorder.copy(alpha = 0.55f), CircleShape)
+                .testTag("camera_flip_button")
+        ) {
+            Icon(
+                imageVector = Icons.Default.Cameraswitch,
+                contentDescription = "Đổi camera trước/sau",
+                tint = if (dockState.isRecording) MutedSlate else PureWhite,
+                modifier = Modifier.size(22.dp)
+            )
+        }
+    }
 }

@@ -46,7 +46,7 @@ data class HungCamSettings(
     val naturalColorBoostEnabled: Boolean = true,
     val cameraWatermarkEnabled: Boolean = false,
     // Live Photo settings
-    val livePhotoDefaultDuration: LivePhotoDuration = LivePhotoDuration.THREE_SEC,
+    val livePhotoDefaultDuration: LivePhotoDuration = LivePhotoDuration.OFF,
     val livePhotoSoundEnabled: Boolean = true,
     val livePhotoAutoLoopViewer: Boolean = true,
     val livePhotoHighBitrate: Boolean = true,
@@ -129,7 +129,7 @@ class SettingsDataStore(private val context: Context) {
             volumeShutterEnabled = prefs[Keys.VOLUME_SHUTTER] ?: true,
             naturalColorBoostEnabled = prefs[Keys.NATURAL_COLOR_BOOST] ?: true,
             cameraWatermarkEnabled = prefs[Keys.CAMERA_WATERMARK] ?: false,
-            livePhotoDefaultDuration = enumValueOrDefault(prefs[Keys.LIVE_DURATION], LivePhotoDuration.THREE_SEC),
+            livePhotoDefaultDuration = enumValueOrDefault(prefs[Keys.LIVE_DURATION], LivePhotoDuration.OFF),
             livePhotoSoundEnabled = prefs[Keys.LIVE_SOUND] ?: true,
             livePhotoAutoLoopViewer = prefs[Keys.LIVE_LOOP] ?: true,
             livePhotoHighBitrate = prefs[Keys.LIVE_HIGH_BITRATE] ?: true,

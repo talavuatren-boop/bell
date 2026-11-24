@@ -63,6 +63,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -115,7 +116,12 @@ class CameraEngine(
     private var backgroundThread: HandlerThread? = null
     private var backgroundHandler: Handler? = null
     private val sessionExecutor = Executors.newSingleThreadExecutor()
+    private val cameraLifecycleDispatcher = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "HungCamLifecycle").apply { priority = Thread.NORM_PRIORITY + 1 }
+    }.asCoroutineDispatcher()
     private val cameraOpenCloseLock = Semaphore(1)
+    private var lastRepeatingFingerprint: Int = 0
+    private var hasConfiguredSessionOnce: Boolean = false
 
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
@@ -215,27 +221,31 @@ class CameraEngine(
     fun attachTextureView(tv: TextureView, rotationDegrees: Int) {
         textureView = tv
         displayRotationDegrees = rotationDegrees
+        tv.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+            override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
+                configureTextureTransform(width, height)
+                openCameraIfReady()
+            }
+            override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
+                configureTextureTransform(width, height)
+            }
+            override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+                val surfToRelease = previewSurface
+                val texToRelease = previewSurfaceTexture ?: surface
+                previewSurface = null
+                previewSurfaceTexture = null
+                if (textureView === tv) {
+                    textureView = null
+                }
+                closeCamera(releaseSurface = surfToRelease, releaseTexture = texToRelease)
+                // Return false so HAL session finishes closing cleanly on lifecycle thread before releasing SurfaceTexture
+                return false
+            }
+            override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
+        }
         if (tv.isAvailable) {
             configureTextureTransform(tv.width, tv.height)
             openCameraIfReady()
-        } else {
-            tv.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-                override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
-                    configureTextureTransform(width, height)
-                    openCameraIfReady()
-                }
-                override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
-                    configureTextureTransform(width, height)
-                }
-                override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
-                    closeCamera()
-                    previewSurface?.release()
-                    previewSurface = null
-                    previewSurfaceTexture = null
-                    return true
-                }
-                override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
-            }
         }
     }
 
@@ -288,7 +298,25 @@ class CameraEngine(
         currentTimelapseSpeed = timelapseSpeed
         currentSlowMoOption = slowMoOption
 
+        val repeatingFingerprint = java.util.Objects.hash(
+            lens.cameraId,
+            lens.physicalId,
+            mode,
+            proCaptureType,
+            flash,
+            settings.hdrMode,
+            settings.stabilizationMode,
+            settings.videoFps,
+            settings.lowEndOptimizedMode,
+            proParams,
+            timelapseSpeed,
+            slowMoOption
+        )
+        val repeatingChanged = repeatingFingerprint != lastRepeatingFingerprint
+        lastRepeatingFingerprint = repeatingFingerprint
+
         if (lensChanged) {
+            hasConfiguredSessionOnce = true
             capLiveStillTo1080p = false
             useLivePhotoFallbackTwoSurface = false
             useMinimalTwoSurfaceFallback = false
@@ -297,14 +325,23 @@ class CameraEngine(
             _runtimeState.value = _runtimeState.value.copy(activeZoom = currentZoomRatio)
             closeCamera()
             openCameraIfReady()
+        } else if (!hasConfiguredSessionOnce) {
+            hasConfiguredSessionOnce = true
+            if (cameraDevice == null && textureView?.isAvailable == true) {
+                openCameraIfReady()
+            } else if (cameraDevice != null && textureView?.isAvailable == true) {
+                backgroundHandler?.post { createPreviewSession() }
+            }
         } else if (modeChanged || proTypeChanged || liveChanged || formatChanged || aspectChanged) {
             if (cameraDevice != null && textureView?.isAvailable == true) {
                 backgroundHandler?.post { createPreviewSession() }
             }
-        } else {
+        } else if (repeatingChanged) {
             applyRepeatingRequestChanges()
         }
     }
+
+    fun currentZoomRatio(): Float = currentZoomRatio
 
     fun updatePortraitFocusPoint(normX: Float, normY: Float) {
         portraitFocusX = normX.coerceIn(0.15f, 0.85f)
@@ -321,12 +358,14 @@ class CameraEngine(
     fun setZoomRatio(zoom: Float) {
         val lens = activeLens ?: return
         zoomAnimationJob?.cancel()
-        currentZoomRatio = zoom.coerceIn(lens.minZoom, lens.maxZoom)
+        val next = zoom.coerceIn(lens.minZoom, lens.maxZoom)
+        if (abs(next - currentZoomRatio) < 0.002f) return
+        currentZoomRatio = next
         _runtimeState.value = _runtimeState.value.copy(activeZoom = currentZoomRatio)
         applyRepeatingRequestChanges()
     }
 
-    fun smoothZoomTo(targetZoom: Float, durationMs: Long = 220L) {
+    fun smoothZoomTo(targetZoom: Float, durationMs: Long = 175L) {
         val lens = activeLens ?: return
         val clampedTarget = targetZoom.coerceIn(lens.minZoom, lens.maxZoom)
         val startZoom = currentZoomRatio
@@ -336,11 +375,11 @@ class CameraEngine(
         }
         zoomAnimationJob?.cancel()
         zoomAnimationJob = scope.launch {
-            val steps = 15
+            val steps = 11
             val stepDelay = (durationMs / steps).coerceAtLeast(16L)
             for (i in 1..steps) {
                 val t = i.toFloat() / steps.toFloat()
-                // Smooth cubic ease-out curve at ~60fps for optical zoom glide
+                // Smooth cubic ease-out curve at 60fps+ for optical zoom glide
                 val eased = 1f - (1f - t) * (1f - t) * (1f - t)
                 val z = startZoom + (clampedTarget - startZoom) * eased
                 currentZoomRatio = z.coerceIn(lens.minZoom, lens.maxZoom)
@@ -400,21 +439,27 @@ class CameraEngine(
 
     @SuppressLint("MissingPermission")
     fun openCameraIfReady() {
-        val tv = textureView ?: return
-        val lens = activeLens ?: return
-        if (!tv.isAvailable) return
-        if (cameraDevice != null) return
+        scope.launch(cameraLifecycleDispatcher) {
+            val tv = textureView ?: return@launch
+            val lens = activeLens ?: return@launch
+            if (!tv.isAvailable) return@launch
+            if (cameraDevice != null) return@launch
 
-        startBackgroundThread()
-        val handler = backgroundHandler ?: return
+            startBackgroundThread()
+            val handler = backgroundHandler ?: return@launch
 
-        scope.launch(Dispatchers.IO) {
             if (!cameraOpenCloseLock.tryAcquire(1500, TimeUnit.MILLISECONDS)) return@launch
             try {
+                if (textureView == null || !tv.isAvailable || cameraDevice != null) {
+                    cameraOpenCloseLock.release()
+                    return@launch
+                }
                 activeCharacteristics = cameraManager.getCameraCharacteristics(lens.cameraId)
                 previewSize = chooseOptimalPreviewSize(activeCharacteristics, tv.width, tv.height)
                 withContext(Dispatchers.Main) {
-                    configureTextureTransform(tv.width, tv.height)
+                    if (textureView === tv && tv.isAvailable) {
+                        configureTextureTransform(tv.width, tv.height)
+                    }
                 }
                 val lockReleased = java.util.concurrent.atomic.AtomicBoolean(false)
                 fun releaseOpenLockOnce() {
@@ -426,6 +471,10 @@ class CameraEngine(
                     cameraManager.openCamera(lens.cameraId, object : CameraDevice.StateCallback() {
                         override fun onOpened(camera: CameraDevice) {
                             releaseOpenLockOnce()
+                            if (textureView == null) {
+                                runCatching { camera.close() }
+                                return
+                            }
                             cameraDevice = camera
                             _runtimeState.value = _runtimeState.value.copy(isCameraOpen = true, errorMessage = null)
                             backgroundHandler?.post { createPreviewSession() }
@@ -499,39 +548,46 @@ class CameraEngine(
         }
     }
 
-    fun closeCamera() {
-        runCatching {
-            cameraOpenCloseLock.acquire()
-            if (_runtimeState.value.isRecording) {
-                runCatching { mediaRecorder?.stop() }
-                runCatching { mediaRecorder?.release() }
-                mediaRecorder = null
-                runCatching { activeVideoOutputFile?.delete() }
-                activeVideoOutputFile = null
-                activeGyroOutputFile = null
-                sensorTelemetry.stop()
+    fun closeCamera(
+        releaseSurface: Surface? = null,
+        releaseTexture: SurfaceTexture? = null
+    ) {
+        scope.launch(cameraLifecycleDispatcher) {
+            runCatching {
+                cameraOpenCloseLock.acquire()
+                if (_runtimeState.value.isRecording) {
+                    runCatching { mediaRecorder?.stop() }
+                    runCatching { mediaRecorder?.release() }
+                    mediaRecorder = null
+                    runCatching { activeVideoOutputFile?.delete() }
+                    activeVideoOutputFile = null
+                    activeGyroOutputFile = null
+                    sensorTelemetry.stop()
+                }
+                captureSession?.close()
+                captureSession = null
+                cameraDevice?.close()
+                cameraDevice = null
+                stillImageReader?.close()
+                stillImageReader = null
+                rawImageReader?.close()
+                rawImageReader = null
+                analysisImageReader?.close()
+                analysisImageReader = null
+                livePhotoBuffer?.stop()
+                livePhotoBuffer = null
+                _runtimeState.value = _runtimeState.value.copy(
+                    isCameraOpen = false,
+                    isPreviewActive = false,
+                    isRecording = false,
+                    isRecordingPaused = false
+                )
             }
-            captureSession?.close()
-            captureSession = null
-            cameraDevice?.close()
-            cameraDevice = null
-            stillImageReader?.close()
-            stillImageReader = null
-            rawImageReader?.close()
-            rawImageReader = null
-            analysisImageReader?.close()
-            analysisImageReader = null
-            livePhotoBuffer?.stop()
-            livePhotoBuffer = null
-            _runtimeState.value = _runtimeState.value.copy(
-                isCameraOpen = false,
-                isPreviewActive = false,
-                isRecording = false,
-                isRecordingPaused = false
-            )
+            runCatching { releaseSurface?.release() }
+            runCatching { releaseTexture?.release() }
+            cameraOpenCloseLock.release()
+            stopBackgroundThread()
         }
-        cameraOpenCloseLock.release()
-        stopBackgroundThread()
     }
 
     private fun getOrCreatePreviewSurface(st: SurfaceTexture): Surface {
@@ -720,12 +776,12 @@ class CameraEngine(
                 width = liveSize.width,
                 height = liveSize.height,
                 bitrateBps = when {
-                    effectiveLowEnd -> 8_000_000
-                    currentSettings.livePhotoHighBitrate -> 14_000_000
-                    else -> 9_000_000
+                    effectiveLowEnd -> 6_500_000
+                    currentSettings.livePhotoHighBitrate -> 10_000_000
+                    else -> 8_000_000
                 },
                 fps = 30,
-                maxBufferSeconds = if (effectiveLowEnd) 11 else 14
+                maxBufferSeconds = if (effectiveLowEnd) 11 else 13
             )
             if (buf.start(enableAudio = currentSettings.livePhotoSoundEnabled)) {
                 livePhotoBuffer = buf
@@ -2326,7 +2382,7 @@ class CameraEngine(
             }
         }
         val maxW = if (effectiveLowEnd) 1280 else 1920
-        val maxH = if (effectiveLowEnd) 960 else 1440
+        val maxH = if (effectiveLowEnd) 960 else 1088
         val bounded = choices.filter { it.width <= maxW && it.height <= maxH }
         val pool = bounded.ifEmpty { choices.filter { it.width <= 1920 && it.height <= 1440 }.ifEmpty { choices.toList() } }
         return pool.minByOrNull { size ->

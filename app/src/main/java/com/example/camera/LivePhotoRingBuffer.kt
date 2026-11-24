@@ -170,11 +170,12 @@ class LivePhotoRingBuffer(
         val codec = videoEncoder ?: return
         val info = MediaCodec.BufferInfo()
         val maxWindowUs = maxBufferSeconds * 1_000_000L
-        var lastSyncRequestMs = 0L
+        var lastKeyframeWallMs = SystemClock.elapsedRealtime()
+        var lastSyncRequestMs = lastKeyframeWallMs
 
         while (running.get()) {
             val nowMs = SystemClock.elapsedRealtime()
-            if (nowMs - lastSyncRequestMs >= 500L) {
+            if (nowMs - lastKeyframeWallMs >= 1100L && nowMs - lastSyncRequestMs >= 1100L) {
                 lastSyncRequestMs = nowMs
                 runCatching {
                     val syncBundle = Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) }
@@ -197,6 +198,9 @@ class LivePhotoRingBuffer(
 
                         val wallUs = SystemClock.elapsedRealtimeNanos() / 1000L
                         val codecPts = if (info.presentationTimeUs > 0L) info.presentationTimeUs else wallUs
+                        if ((info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0) {
+                            lastKeyframeWallMs = nowMs
+                        }
 
                         synchronized(videoLock) {
                             videoPackets.addLast(
@@ -451,25 +455,30 @@ class LivePhotoRingBuffer(
 
     fun stop() {
         running.set(false)
-        runCatching { videoDrainThread?.join(400) }
-        runCatching { audioThread?.join(400) }
+        // Stop AudioRecord first so blocking recorder.read() unblocks immediately instead of stalling join()
+        val rec = audioRecord
+        audioRecord = null
+        runCatching { rec?.stop() }
+        runCatching { rec?.release() }
+
+        runCatching { videoDrainThread?.join(150) }
+        runCatching { audioThread?.join(150) }
         videoDrainThread = null
         audioThread = null
 
-        runCatching { audioRecord?.stop() }
-        runCatching { audioRecord?.release() }
-        audioRecord = null
-
-        runCatching { audioEncoder?.stop() }
-        runCatching { audioEncoder?.release() }
+        val aCodec = audioEncoder
         audioEncoder = null
+        runCatching { aCodec?.stop() }
+        runCatching { aCodec?.release() }
 
-        runCatching { videoEncoder?.stop() }
-        runCatching { videoEncoder?.release() }
+        val vCodec = videoEncoder
         videoEncoder = null
+        runCatching { vCodec?.stop() }
+        runCatching { vCodec?.release() }
 
-        runCatching { inputSurface?.release() }
+        val surf = inputSurface
         inputSurface = null
+        runCatching { surf?.release() }
 
         synchronized(videoLock) { videoPackets.clear() }
         synchronized(audioLock) { audioPackets.clear() }
