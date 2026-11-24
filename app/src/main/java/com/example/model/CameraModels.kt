@@ -3,7 +3,7 @@ package com.example.model
 enum class MainNavDestination(val route: String, val label: String) {
     CAMERA("camera", "Camera"),
     GALLERY("gallery", "Thư viện"),
-    AI_STUDIO("ai_studio", "AI Studio")
+    AI_STUDIO("ai_studio", "AI Lab")
 }
 
 enum class CameraMode(val label: String) {
@@ -157,6 +157,12 @@ enum class AccentColorPreset(val label: String) {
     PURE_WHITE("Trắng"),
     ELECTRIC_CYAN("Xanh Cyan"),
     EMERALD("Ngọc lục")
+}
+
+enum class ModeColorStyle(val label: String, val subtitle: String) {
+    DEFAULT_RED("Đỏ mặc định", "Tông Đỏ Leica đồng nhất"),
+    PER_MODE_VIBRANT("Đa sắc theo Mode", "Mỗi chế độ một màu nổi bật"),
+    MONOCHROME_WHITE("Trắng tối giản", "Trắng tinh khiết kiểu Leica M")
 }
 
 enum class GalleryCategory(val label: String) {

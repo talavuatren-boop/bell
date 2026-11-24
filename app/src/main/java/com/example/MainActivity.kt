@@ -18,6 +18,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        coil.Coil.setImageLoader(
+            com.example.camera.DevicePerformanceProfile.buildFastImageLoader(this)
+        )
         requestHighRefreshRateDisplay()
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.BLACK),

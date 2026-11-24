@@ -93,6 +93,8 @@ import com.example.ui.theme.MonoTelemetrySmall
 import com.example.ui.theme.MutedSlate
 import com.example.ui.theme.PureBlack
 import com.example.ui.theme.PureWhite
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.UUID
 import kotlin.math.min
@@ -175,18 +177,28 @@ fun PhotoEditorScreen(
         currentAdj = next
     }
 
-    LaunchedEffect(asset.mediaStoreUri) {
-        originalBitmap = viewModel.loadScaledBitmap(Uri.parse(asset.mediaStoreUri), 1440)
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val isLowEndSmooth = viewModel.isLowEndDevice || settings.lowEndOptimizedMode
+
+    LaunchedEffect(asset.mediaStoreUri, isLowEndSmooth) {
+        val maxPreviewDim = if (isLowEndSmooth) 960 else 1280
+        originalBitmap = viewModel.loadScaledBitmap(Uri.parse(asset.mediaStoreUri), maxPreviewDim)
         previewBitmap = originalBitmap
     }
 
-    // Recompute base image pixels (adjustments/filter/crop) without baking stickers so stickers stay 60fps draggable
+    // Recompute base image pixels (adjustments/filter/crop) with debounce so slider drags stay 60fps
     val baseImageKey = remember(currentAdj) {
         currentAdj.copy(stickers = emptyList(), memeCaption = MemeCaptionConfig())
     }
     LaunchedEffect(originalBitmap, baseImageKey) {
         val orig = originalBitmap ?: return@LaunchedEffect
-        previewBitmap = ImageProcessor.applyPhotoEditorAdjustments(orig, baseImageKey)
+        delay(45L)
+        val nextPreview = ImageProcessor.applyPhotoEditorAdjustments(orig, baseImageKey)
+        val oldPreview = previewBitmap
+        previewBitmap = nextPreview
+        if (oldPreview != null && oldPreview !== orig && oldPreview !== nextPreview && !oldPreview.isRecycled) {
+            oldPreview.recycle()
+        }
     }
 
     Column(
@@ -248,7 +260,8 @@ fun PhotoEditorScreen(
                     val orig = originalBitmap ?: return@Button
                     isSaving = true
                     scope.launch {
-                        val fullOrig = viewModel.loadScaledBitmap(Uri.parse(asset.mediaStoreUri), 3200) ?: orig
+                        val exportMaxDim = if (isLowEndSmooth) 2400 else 3200
+                        val fullOrig = viewModel.loadScaledBitmap(Uri.parse(asset.mediaStoreUri), exportMaxDim) ?: orig
                         val finalBmp = ImageProcessor.applyPhotoEditorAdjustments(fullOrig, currentAdj)
                         viewModel.saveEditedPhotoCopy(finalBmp, asset.id)
                         isSaving = false

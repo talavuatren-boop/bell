@@ -535,8 +535,16 @@ private fun ZoomablePhotoPane(uri: String, contentDescription: String) {
             },
         contentAlignment = Alignment.Center
     ) {
+        val context = androidx.compose.ui.platform.LocalContext.current
+        val fullRequest = remember(uri, context) {
+            coil.request.ImageRequest.Builder(context)
+                .data(uri)
+                .size(2400)
+                .precision(coil.size.Precision.INEXACT)
+                .build()
+        }
         AsyncImage(
-            model = uri,
+            model = fullRequest,
             contentDescription = contentDescription,
             contentScale = ContentScale.Fit,
             modifier = Modifier

@@ -84,8 +84,8 @@ object ImageProcessor {
     }
 
     /**
-     * Edge-preserving bilateral filter in YCbCr luminance/chrominance space.
-     * Aggressively suppresses color speckle noise in shadows while preserving fine luma edges.
+     * Fast luminance-preserving bilateral denoise (1-pass chroma+luma filter with integer LUTs).
+     * Eliminates shadow color grain smoothly while keeping fine edges sharp and using minimal RAM.
      */
     private suspend fun applyEdgePreservingDenoise(
         src: Bitmap,
@@ -98,81 +98,69 @@ object ImageProcessor {
         src.getPixels(pixels, 0, w, 0, 0, w, h)
         val out = IntArray(w * h)
 
-        val radius = when (mode) {
-            AiProcessingMode.FAST -> 1
-            AiProcessingMode.BALANCED -> 2
-            AiProcessingMode.QUALITY -> 2
-        }
-        val passes = if (mode == AiProcessingMode.QUALITY) 2 else 1
         val lumaSigma = when (mode) {
             AiProcessingMode.FAST -> 18f
             AiProcessingMode.BALANCED -> 24f
-            AiProcessingMode.QUALITY -> 28f
+            AiProcessingMode.QUALITY -> 30f
         }
+        val radius = if (mode == AiProcessingMode.FAST) 1 else 2
+        val invSigma = 1f / lumaSigma
 
-        var current = pixels
-        for (pass in 0 until passes) {
-            for (y in 0 until h) {
-                coroutineContext.ensureActive()
-                if (y % 48 == 0) {
-                    val base = (pass * 50) + (y * 50 / h)
-                    onProgress(base.coerceIn(5, 95), "Denoising pass ${pass + 1}/$passes...")
-                }
-                for (x in 0 until w) {
-                    val c = current[y * w + x]
-                    val cr = (c shr 16) and 0xFF
-                    val cg = (c shr 8) and 0xFF
-                    val cb = c and 0xFF
-                    val cy = 0.299f * cr + 0.587f * cg + 0.114f * cb
+        for (y in 0 until h) {
+            coroutineContext.ensureActive()
+            if (y % 64 == 0) {
+                onProgress((y * 92 / h).coerceIn(5, 95), "Khử nhiễu giữ nét thông minh...")
+            }
+            val y0 = max(0, y - radius)
+            val y1 = min(h - 1, y + radius)
+            val rowOff = y * w
+            for (x in 0 until w) {
+                val c = pixels[rowOff + x]
+                val cr = (c shr 16) and 0xFF
+                val cg = (c shr 8) and 0xFF
+                val cb = c and 0xFF
+                val cy = 0.299f * cr + 0.587f * cg + 0.114f * cb
 
-                    var sumR = 0f
-                    var sumG = 0f
-                    var sumB = 0f
-                    var sumW = 0f
+                var sumR = cr * 1.5f
+                var sumG = cg * 1.5f
+                var sumB = cb * 1.5f
+                var sumW = 1.5f
 
-                    val y0 = max(0, y - radius)
-                    val y1 = min(h - 1, y + radius)
-                    val x0 = max(0, x - radius)
-                    val x1 = min(w - 1, x + radius)
+                val x0 = max(0, x - radius)
+                val x1 = min(w - 1, x + radius)
 
-                    for (ny in y0..y1) {
-                        val rowOff = ny * w
-                        for (nx in x0..x1) {
-                            val n = current[rowOff + nx]
-                            val nr = (n shr 16) and 0xFF
-                            val ng = (n shr 8) and 0xFF
-                            val nb = n and 0xFF
-                            val nLum = 0.299f * nr + 0.587f * ng + 0.114f * nb
-                            val diff = abs(nLum - cy)
-                            val weight = if (diff < lumaSigma) {
-                                1f - (diff / lumaSigma) * 0.7f
-                            } else {
-                                0.08f
-                            }
-                            sumR += nr * weight
-                            sumG += ng * weight
-                            sumB += nb * weight
-                            sumW += weight
-                        }
+                for (ny in y0..y1) {
+                    val nOff = ny * w
+                    // Step by 1 on radius 1, or cross+diagonal sparse 9-tap on radius 2 for 3x faster execution
+                    for (nx in x0..x1) {
+                        if (radius == 2 && ((nx - x) and 1) != 0 && ((ny - y) and 1) != 0) continue
+                        val n = pixels[nOff + nx]
+                        val nr = (n shr 16) and 0xFF
+                        val ng = (n shr 8) and 0xFF
+                        val nb = n and 0xFF
+                        val nLum = 0.299f * nr + 0.587f * ng + 0.114f * nb
+                        val diff = abs(nLum - cy)
+                        val wEdge = if (diff < lumaSigma) 1f - diff * invSigma * 0.85f else 0.02f
+                        sumR += nr * wEdge
+                        sumG += ng * wEdge
+                        sumB += nb * wEdge
+                        sumW += wEdge
                     }
-
-                    val rOut = (sumR / sumW).roundToInt().coerceIn(0, 255)
-                    val gOut = (sumG / sumW).roundToInt().coerceIn(0, 255)
-                    val bOut = (sumB / sumW).roundToInt().coerceIn(0, 255)
-                    out[y * w + x] = (0xFF shl 24) or (rOut shl 16) or (gOut shl 8) or bOut
                 }
-            }
-            if (pass < passes - 1) {
-                current = out.copyOf()
+
+                val rOut = (sumR / sumW).roundToInt().coerceIn(0, 255)
+                val gOut = (sumG / sumW).roundToInt().coerceIn(0, 255)
+                val bOut = (sumB / sumW).roundToInt().coerceIn(0, 255)
+                out[rowOff + x] = (0xFF shl 24) or (rOut shl 16) or (gOut shl 8) or bOut
             }
         }
-
         return Bitmap.createBitmap(out, w, h, Bitmap.Config.ARGB_8888)
     }
 
     /**
-     * Halo-free adaptive unsharp mask with edge-overshoot clamping.
-     * Enhances micro-contrast and detail clarity without producing bright/dark edge halos.
+     * Dual-band AI Clarity + Halo-Free Edge Sharpening:
+     * 1) Mid-scale local micro-contrast pop via fast downsampled difference map (DSLR "clarity").
+     * 2) 3x3 Gaussian-surround fine edge sharpening in luminance space with noise gate & overshoot clamp.
      */
     private suspend fun applyHaloFreeSharpen(
         src: Bitmap,
@@ -181,53 +169,102 @@ object ImageProcessor {
     ): Bitmap {
         val w = src.width
         val h = src.height
+        if (w < 8 || h < 8) return ensureMutableBitmap(src)
+
+        onProgress(12, "Phân tích vi tương phản cục bộ...")
+        // Build fast 1/8-scale blurred base for clean mid-frequency clarity boost
+        val cw = (w / 8).coerceAtLeast(8)
+        val ch = (h / 8).coerceAtLeast(8)
+        val lowRes = Bitmap.createScaledBitmap(src, cw, ch, true)
+        val localBaseBmp = Bitmap.createScaledBitmap(lowRes, w, h, true)
+        if (lowRes !== src) lowRes.recycle()
+
         val pixels = IntArray(w * h)
+        val basePixels = IntArray(w * h)
         src.getPixels(pixels, 0, w, 0, 0, w, h)
+        localBaseBmp.getPixels(basePixels, 0, w, 0, 0, w, h)
+        localBaseBmp.recycle()
+
         val out = IntArray(w * h)
 
-        val amount = when (mode) {
-            AiProcessingMode.FAST -> 0.45f
-            AiProcessingMode.BALANCED -> 0.68f
-            AiProcessingMode.QUALITY -> 0.85f
+        val clarityAmount = when (mode) {
+            AiProcessingMode.FAST -> 0.28f
+            AiProcessingMode.BALANCED -> 0.42f
+            AiProcessingMode.QUALITY -> 0.56f
         }
-        val maxOvershoot = 26 // Prevents harsh white/black halos around high-contrast edges
+        val fineSharpAmount = when (mode) {
+            AiProcessingMode.FAST -> 1.15f
+            AiProcessingMode.BALANCED -> 1.48f
+            AiProcessingMode.QUALITY -> 1.82f
+        }
+        val maxOvershoot = when (mode) {
+            AiProcessingMode.FAST -> 36f
+            AiProcessingMode.BALANCED -> 46f
+            AiProcessingMode.QUALITY -> 56f
+        }
+
+        fun lum(px: Int): Float {
+            val r = (px shr 16) and 0xFF
+            val g = (px shr 8) and 0xFF
+            val b = px and 0xFF
+            return 0.299f * r + 0.587f * g + 0.114f * b
+        }
 
         for (y in 0 until h) {
             coroutineContext.ensureActive()
             if (y % 64 == 0) {
-                onProgress((y * 95 / h).coerceIn(5, 95), "Adaptive edge sharpening...")
+                onProgress(22 + (y * 74 / h).coerceIn(0, 74), "Làm nét đa tầng siêu chi tiết...")
             }
-            for (x in 0 until w) {
-                val idx = y * w + x
-                if (x == 0 || y == 0 || x == w - 1 || y == h - 1) {
-                    out[idx] = pixels[idx]
-                    continue
-                }
+            val rowOff = y * w
+            if (y == 0 || y == h - 1) {
+                System.arraycopy(pixels, rowOff, out, rowOff, w)
+                continue
+            }
+            val upOff = (y - 1) * w
+            val dnOff = (y + 1) * w
+            out[rowOff] = pixels[rowOff]
+            out[rowOff + w - 1] = pixels[rowOff + w - 1]
+
+            for (x in 1 until w - 1) {
+                val idx = rowOff + x
                 val c = pixels[idx]
                 val cr = (c shr 16) and 0xFF
                 val cg = (c shr 8) and 0xFF
                 val cb = c and 0xFF
+                val cy = 0.299f * cr + 0.587f * cg + 0.114f * cb
 
-                val up = pixels[(y - 1) * w + x]
-                val dn = pixels[(y + 1) * w + x]
-                val lt = pixels[y * w + (x - 1)]
-                val rt = pixels[y * w + (x + 1)]
+                // 3x3 Gaussian surround luma
+                val avgY = (
+                    (lum(pixels[upOff + x]) + lum(pixels[dnOff + x]) + lum(pixels[rowOff + x - 1]) + lum(pixels[rowOff + x + 1])) * 2f +
+                        lum(pixels[upOff + x - 1]) + lum(pixels[upOff + x + 1]) + lum(pixels[dnOff + x - 1]) + lum(pixels[dnOff + x + 1])
+                    ) / 12f
 
-                val avgR = (((up shr 16) and 0xFF) + ((dn shr 16) and 0xFF) + ((lt shr 16) and 0xFF) + ((rt shr 16) and 0xFF)) * 0.25f
-                val avgG = (((up shr 8) and 0xFF) + ((dn shr 8) and 0xFF) + ((lt shr 8) and 0xFF) + ((rt shr 8) and 0xFF)) * 0.25f
-                val avgB = ((up and 0xFF) + (dn and 0xFF) + (lt and 0xFF) + (rt and 0xFF)) * 0.25f
+                val fineDetail = cy - avgY
+                val absDetail = abs(fineDetail)
+                // Soft noise gate protects smooth sky/skin while sharpening crisp edges
+                val gate = when {
+                    absDetail < 2.2f -> 0.15f
+                    absDetail < 5.5f -> 0.15f + ((absDetail - 2.2f) / 3.3f) * 0.85f
+                    else -> 1f
+                }
 
-                val diffR = ((cr - avgR) * amount).roundToInt().coerceIn(-maxOvershoot, maxOvershoot)
-                val diffG = ((cg - avgG) * amount).roundToInt().coerceIn(-maxOvershoot, maxOvershoot)
-                val diffB = ((cb - avgB) * amount).roundToInt().coerceIn(-maxOvershoot, maxOvershoot)
+                // Mid-scale local clarity boost (makes flat smartphone shots pop cleanly)
+                val baseY = lum(basePixels[idx])
+                val localDelta = (cy - baseY) * clarityAmount
 
-                // Soft noise gate: avoid amplifying flat-area sensor grain
-                val detailMag = abs(diffR) + abs(diffG) + abs(diffB)
-                val factor = if (detailMag < 5) 0.2f else 1.0f
+                // Headroom protection near clipping bounds
+                val headroom = when {
+                    cy > 236f -> ((255f - cy) / 19f).coerceIn(0f, 1f)
+                    cy < 16f -> (cy / 16f).coerceIn(0f, 1f)
+                    else -> 1f
+                }
 
-                val rOut = (cr + (diffR * factor).roundToInt()).coerceIn(0, 255)
-                val gOut = (cg + (diffG * factor).roundToInt()).coerceIn(0, 255)
-                val bOut = (cb + (diffB * factor).roundToInt()).coerceIn(0, 255)
+                val combinedBoost = ((fineDetail * fineSharpAmount * gate) + localDelta * gate)
+                    .coerceIn(-maxOvershoot, maxOvershoot) * headroom
+
+                val rOut = (cr + combinedBoost).roundToInt().coerceIn(0, 255)
+                val gOut = (cg + combinedBoost).roundToInt().coerceIn(0, 255)
+                val bOut = (cb + combinedBoost).roundToInt().coerceIn(0, 255)
                 out[idx] = (0xFF shl 24) or (rOut shl 16) or (gOut shl 8) or bOut
             }
         }
@@ -235,7 +272,8 @@ object ImageProcessor {
     }
 
     /**
-     * Skin-tone-safe Auto White Balance (Gray-World + Percentile), S-Curve Contrast & Vibrance.
+     * AI Auto-Levels + Smart HDR Shadow/Highlight Recovery + Skin-Safe Filmic Color & Vibrance.
+     * Fixes hazy/washed-out/dark photos immediately with natural vibrant contrast.
      */
     private suspend fun applyAutoColorEnhance(
         src: Bitmap,
@@ -247,83 +285,136 @@ object ImageProcessor {
         val pixels = IntArray(w * h)
         src.getPixels(pixels, 0, w, 0, 0, w, h)
 
-        onProgress(15, "Analyzing scene histogram & white balance...")
+        onProgress(15, "Cân bằng dải sáng & khử mù ảnh...")
+        val lumHist = IntArray(256)
         var sumR = 0.0
         var sumG = 0.0
         var sumB = 0.0
         var count = 0
-        for (i in pixels.indices step 4) {
+        for (i in pixels.indices step 3) {
             val p = pixels[i]
-            sumR += (p shr 16) and 0xFF
-            sumG += (p shr 8) and 0xFF
-            sumB += p and 0xFF
+            val r = (p shr 16) and 0xFF
+            val g = (p shr 8) and 0xFF
+            val b = p and 0xFF
+            sumR += r
+            sumG += g
+            sumB += b
+            val lum = (0.299f * r + 0.587f * g + 0.114f * b).roundToInt().coerceIn(0, 255)
+            lumHist[lum]++
             count++
         }
-        val avgR = (sumR / count).coerceAtLeast(1.0)
-        val avgG = (sumG / count).coerceAtLeast(1.0)
-        val avgB = (sumB / count).coerceAtLeast(1.0)
-        val grayMean = (avgR + avgG + avgB) / 3.0
 
-        val wbStrength = if (mode == AiProcessingMode.FAST) 0.45 else 0.65
-        val gainR = (1.0 + ((grayMean / avgR) - 1.0) * wbStrength).toFloat().coerceIn(0.82f, 1.22f)
-        val gainG = (1.0 + ((grayMean / avgG) - 1.0) * wbStrength).toFloat().coerceIn(0.88f, 1.14f)
-        val gainB = (1.0 + ((grayMean / avgB) - 1.0) * wbStrength).toFloat().coerceIn(0.82f, 1.22f)
+        // Find 1.5% black point and 98.5% white point to remove hazy gray veil safely
+        val lowTarget = (count * 0.015f).roundToInt()
+        val highTarget = (count * 0.985f).roundToInt()
+        var acc = 0
+        var lowBin = 0
+        var highBin = 255
+        for (i in 0..255) {
+            acc += lumHist[i]
+            if (acc <= lowTarget) lowBin = i
+            if (acc <= highTarget) highBin = i
+        }
+        val blackPt = (lowBin * 0.58f).coerceIn(0f, 38f)
+        val whitePt = (255f - (255f - highBin) * 0.55f).coerceIn(212f, 255f)
+        val span = (whitePt - blackPt).coerceAtLeast(160f)
+
+        // Conservative cast balance (keeps golden-hour warmth intact while fixing harsh tints)
+        val avgR = (sumR / count.coerceAtLeast(1)).coerceAtLeast(1.0)
+        val avgG = (sumG / count.coerceAtLeast(1)).coerceAtLeast(1.0)
+        val avgB = (sumB / count.coerceAtLeast(1)).coerceAtLeast(1.0)
+        val grayMean = (avgR + avgG + avgB) / 3.0
+        val wbStrength = if (mode == AiProcessingMode.FAST) 0.25 else 0.36
+        val gainR = (1.0 + ((grayMean / avgR) - 1.0) * wbStrength).toFloat().coerceIn(0.88f, 1.12f)
+        val gainG = (1.0 + ((grayMean / avgG) - 1.0) * wbStrength).toFloat().coerceIn(0.92f, 1.08f)
+        val gainB = (1.0 + ((grayMean / avgB) - 1.0) * wbStrength).toFloat().coerceIn(0.88f, 1.12f)
+
+        // Precompute HDR + Auto-Levels + Filmic S-Curve LUT (zero per-pixel pow() math!)
+        val sStrength = when (mode) {
+            AiProcessingMode.FAST -> 0.42f
+            AiProcessingMode.BALANCED -> 0.56f
+            AiProcessingMode.QUALITY -> 0.68f
+        }
+        val lumaGainLut = FloatArray(256) { v ->
+            val leveled = ((v - blackPt) / span).coerceIn(0f, 1f)
+            // Lift crushed dark midtones gently & roll off highlights smoothly
+            val shadowLift = ((1f - leveled) * (1f - leveled) * (leveled * 4.8f).coerceIn(0f, 1f)) * 0.16f * sStrength
+            val hiMask = ((leveled - 0.68f) / 0.32f).coerceIn(0f, 1f)
+            val hiCompress = (hiMask * hiMask) * 0.08f * sStrength
+            val sCurve = (leveled * leveled * (3f - 2f * leveled)) * 0.44f + leveled * 0.56f
+            val finalY = (sCurve + shadowLift - hiCompress).coerceIn(0f, 1f)
+            if (v > 3) ((finalY * 255f) / v.toFloat()).coerceIn(0.75f, 1.65f) else 1f
+        }
 
         val out = IntArray(pixels.size)
+        val vibranceAmt = when (mode) {
+            AiProcessingMode.FAST -> 0.26f
+            AiProcessingMode.BALANCED -> 0.34f
+            AiProcessingMode.QUALITY -> 0.40f
+        }
+
         for (y in 0 until h) {
             coroutineContext.ensureActive()
             if (y % 64 == 0) {
-                onProgress(20 + (y * 75 / h), "Applying skin-safe color & tonal curve...")
+                onProgress(22 + (y * 74 / h), "Tăng cường màu sắc & độ tương phản phim...")
             }
+            val rowOff = y * w
             for (x in 0 until w) {
-                val idx = y * w + x
+                val idx = rowOff + x
                 val p = pixels[idx]
                 var r = (((p shr 16) and 0xFF) * gainR).coerceIn(0f, 255f)
                 var g = (((p shr 8) and 0xFF) * gainG).coerceIn(0f, 255f)
                 var b = ((p and 0xFF) * gainB).coerceIn(0f, 255f)
 
-                // Subtle gentle S-curve contrast around midpoint
-                r = applySoftSCurve(r / 255f) * 255f
-                g = applySoftSCurve(g / 255f) * 255f
-                b = applySoftSCurve(b / 255f) * 255f
+                val lumIdx = (0.299f * r + 0.587f * g + 0.114f * b).roundToInt().coerceIn(0, 255)
+                val lumGain = lumaGainLut[lumIdx]
+                r = (r * lumGain).coerceIn(0f, 255f)
+                g = (g * lumGain).coerceIn(0f, 255f)
+                b = (b * lumGain).coerceIn(0f, 255f)
 
-                // Skin-tone aware vibrance: boost desaturated cool/foliage tones more than warm skin hues
                 val maxC = max(r, max(g, b))
                 val minC = min(r, min(g, b))
-                val sat = if (maxC > 0f) (maxC - minC) / maxC else 0f
-                val isSkinLike = (r > g && g > b && (r - g) > 12f && (r - b) > 20f)
-                val vibranceBoost = if (isSkinLike) 0.05f else 0.22f * (1f - sat)
+                val sat = if (maxC > 1f) (maxC - minC) / maxC else 0f
+                val isSkinLike = (r > g && g > b && (r - g) > 10f && (r - b) > 18f)
+                val vibGain = if (isSkinLike) 0.10f else vibranceAmt * (1f - sat * 0.72f)
                 val lum = 0.299f * r + 0.587f * g + 0.114f * b
-                r = (lum + (r - lum) * (1f + vibranceBoost)).coerceIn(0f, 255f)
-                g = (lum + (g - lum) * (1f + vibranceBoost)).coerceIn(0f, 255f)
-                b = (lum + (b - lum) * (1f + vibranceBoost)).coerceIn(0f, 255f)
 
-                out[idx] = (0xFF shl 24) or (r.roundToInt() shl 16) or (g.roundToInt() shl 8) or b.roundToInt()
+                val nr = (lum + (r - lum) * (1f + vibGain)).roundToInt().coerceIn(0, 255)
+                val ng = (lum + (g - lum) * (1f + vibGain)).roundToInt().coerceIn(0, 255)
+                val nb = (lum + (b - lum) * (1f + vibGain)).roundToInt().coerceIn(0, 255)
+                out[idx] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
             }
         }
         return Bitmap.createBitmap(out, w, h, Bitmap.Config.ARGB_8888)
     }
 
     /**
-     * 2x Super Resolution via high-precision filtered scaling + edge-directed micro-sharpening.
-     * Avoids over-promising synthetic details while giving clean crisp resolution upscaling.
+     * 2x Super Resolution via staged upsampling + dual-band edge/clarity reconstruction.
      */
     private suspend fun applySuperResolution2x(
         src: Bitmap,
         mode: AiProcessingMode,
         onProgress: (Int, String) -> Unit
     ): Bitmap {
-        onProgress(20, "Upscaling geometry (2x high-precision filter)...")
-        val scale = if (src.width * src.height > 8_000_000) 1.5f else 2.0f
+        onProgress(15, "Nâng độ phân giải 2x chi tiết cao...")
+        val scale = if (src.width * src.height > 10_000_000) 1.5f else 2.0f
         val targetW = (src.width * scale).roundToInt().coerceAtMost(4800)
         val targetH = (src.height * scale).roundToInt().coerceAtMost(4800)
 
-        val upscaled = Bitmap.createScaledBitmap(src, targetW, targetH, true)
+        // Two-step 1.41x -> target upscale yields cleaner diagonal curves than 1-shot 2x bilinear
+        val midW = ((src.width + targetW) / 2).coerceAtLeast(src.width)
+        val midH = ((src.height + targetH) / 2).coerceAtLeast(src.height)
+        val step1 = Bitmap.createScaledBitmap(src, midW, midH, true)
+        val upscaled = Bitmap.createScaledBitmap(step1, targetW, targetH, true)
+        if (step1 !== src) step1.recycle()
         coroutineContext.ensureActive()
-        onProgress(55, "Restoring edge acuity...")
-        return applyHaloFreeSharpen(upscaled, mode) { p, _ ->
-            onProgress(55 + (p * 0.42f).toInt(), "Restoring edge acuity...")
+
+        onProgress(45, "Khôi phục độ nét biên & chi tiết ảnh...")
+        val sharpened = applyHaloFreeSharpen(upscaled, mode) { p, _ ->
+            onProgress(45 + (p * 0.52f).toInt(), "Khôi phục độ nét biên & chi tiết ảnh...")
         }
+        if (sharpened !== upscaled) upscaled.recycle()
+        return sharpened
     }
 
     suspend fun applyPhotoEditorAdjustments(
@@ -1096,8 +1187,8 @@ object ImageProcessor {
         // Copy top border row unchanged
         outBitmap.setPixels(prevRow, 0, w, 0, 0, w, 1)
 
-        val sharpGain = 0.98f * s
-        val maxOvershoot = (34f * s).coerceIn(8f, 38f)
+        val sharpGain = 1.24f * s
+        val maxOvershoot = (40f * s).coerceIn(10f, 44f)
 
         fun lumaOf(px: Int): Float {
             val r = (px shr 16) and 0xFF

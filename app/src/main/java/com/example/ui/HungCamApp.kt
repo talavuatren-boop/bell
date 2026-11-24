@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -217,53 +218,38 @@ fun HungCamApp(
                                 containerColor = PureBlack,
                                 contentWindowInsets = WindowInsets(0, 0, 0, 0),
                                 snackbarHost = { SnackbarHost(snackbarHostState) },
-                                bottomBar = {
+                                topBar = {
                                     if (!isCameraTab && !useRail) {
-                                        Column(
+                                        Box(
                                             modifier = Modifier
                                                 .fillMaxWidth()
-                                                .background(ObsidianSurface)
-                                                .windowInsetsPadding(WindowInsets.navigationBars)
+                                                .background(PureBlack)
+                                                .statusBarsPadding()
+                                                .padding(horizontal = 16.dp, vertical = 8.dp),
+                                            contentAlignment = Alignment.Center
                                         ) {
-                                            HorizontalDivider(
-                                                thickness = 0.75.dp,
-                                                color = HairlineBorder.copy(alpha = 0.7f)
-                                            )
                                             Row(
                                                 modifier = Modifier
                                                     .fillMaxWidth()
-                                                    .height(62.dp)
-                                                    .padding(horizontal = 16.dp),
-                                                horizontalArrangement = Arrangement.SpaceEvenly,
+                                                    .clip(RoundedCornerShape(18.dp))
+                                                    .background(ObsidianSurface)
+                                                    .border(0.75.dp, HairlineBorder, RoundedCornerShape(18.dp))
+                                                    .padding(4.dp),
+                                                horizontalArrangement = Arrangement.spacedBy(4.dp),
                                                 verticalAlignment = Alignment.CenterVertically
                                             ) {
                                                 MainNavDestination.entries.forEach { dest ->
                                                     val selected = currentTab == dest
                                                     val interaction = remember(dest) { MutableInteractionSource() }
-                                                    val animSpec = androidx.compose.animation.core.tween<androidx.compose.ui.graphics.Color>(
-                                                        durationMillis = if (settings.animationsEnabled) 200 else 0,
-                                                        easing = com.example.ui.components.HungCamMotion.EmphasizedDecelerate
-                                                    )
-                                                    val pillColor by androidx.compose.animation.animateColorAsState(
-                                                        targetValue = if (selected) accent else androidx.compose.ui.graphics.Color.Transparent,
-                                                        animationSpec = animSpec,
-                                                        label = "navPillBg_${dest.route}"
-                                                    )
-                                                    val iconTint by androidx.compose.animation.animateColorAsState(
-                                                        targetValue = if (selected) onAccent else MutedSlate,
-                                                        animationSpec = animSpec,
-                                                        label = "navIconTint_${dest.route}"
-                                                    )
-                                                    val labelTint by androidx.compose.animation.animateColorAsState(
-                                                        targetValue = if (selected) PureWhite else MutedSlate,
-                                                        animationSpec = animSpec,
-                                                        label = "navLabelTint_${dest.route}"
-                                                    )
-                                                    Column(
+                                                    Row(
                                                         modifier = Modifier
                                                             .weight(1f)
-                                                            .springPressScale(interaction, pressedScale = 0.90f)
+                                                            .height(46.dp)
+                                                            .springPressScale(interaction, pressedScale = 0.92f)
                                                             .clip(RoundedCornerShape(14.dp))
+                                                            .background(
+                                                                if (selected) accent else androidx.compose.ui.graphics.Color.Transparent
+                                                            )
                                                             .clickable(
                                                                 interactionSource = interaction,
                                                                 indication = null
@@ -271,32 +257,26 @@ fun HungCamApp(
                                                                 currentTab = dest
                                                                 viewModel.performHapticTick()
                                                             }
-                                                            .padding(vertical = 6.dp)
+                                                            .padding(horizontal = 8.dp)
                                                             .testTag("nav_${dest.route}"),
-                                                        horizontalAlignment = Alignment.CenterHorizontally,
-                                                        verticalArrangement = Arrangement.spacedBy(3.dp)
+                                                        horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+                                                        verticalAlignment = Alignment.CenterVertically
                                                     ) {
-                                                        Box(
-                                                            modifier = Modifier
-                                                                .clip(RoundedCornerShape(12.dp))
-                                                                .background(pillColor)
-                                                                .padding(horizontal = 16.dp, vertical = 4.dp),
-                                                            contentAlignment = Alignment.Center
-                                                        ) {
-                                                            Icon(
-                                                                imageVector = navIconFor(dest, selected),
-                                                                contentDescription = dest.label,
-                                                                tint = iconTint,
-                                                                modifier = Modifier.size(20.dp)
-                                                            )
-                                                        }
+                                                        Icon(
+                                                            imageVector = navIconFor(dest, selected),
+                                                            contentDescription = dest.label,
+                                                            tint = if (selected) onAccent else MutedSlate,
+                                                            modifier = Modifier.size(18.dp)
+                                                        )
                                                         Text(
                                                             text = dest.label,
-                                                            style = MaterialTheme.typography.labelMedium.copy(
-                                                                fontSize = 11.sp,
+                                                            style = MaterialTheme.typography.labelLarge.copy(
+                                                                fontSize = 12.5.sp,
                                                                 fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
                                                             ),
-                                                            color = labelTint
+                                                            color = if (selected) onAccent else PureWhite.copy(alpha = 0.8f),
+                                                            maxLines = 1,
+                                                            softWrap = false
                                                         )
                                                     }
                                                 }
@@ -309,6 +289,7 @@ fun HungCamApp(
                                     modifier = Modifier
                                         .fillMaxSize()
                                         .padding(innerPadding)
+                                        .then(if (useRail) Modifier.statusBarsPadding() else Modifier)
                                 ) {
                                     if (useRail) {
                                         NavigationRail(
@@ -363,12 +344,10 @@ fun HungCamApp(
                                                 viewModel = viewModel,
                                                 onOpenGallery = { currentTab = MainNavDestination.GALLERY },
                                                 onOpenSettings = { subScreen = SubScreen.Settings },
-                                                onOpenAiStudio = { currentTab = MainNavDestination.AI_STUDIO },
                                                 onOpenCapabilityReport = { subScreen = SubScreen.CapabilityReport },
                                                 onOpenStickersMeme = { asset ->
                                                     subScreen = SubScreen.PhotoEdit(asset, openStickersMeme = true)
                                                 },
-                                                onOpenVideoMerge = { subScreen = SubScreen.VideoMerge },
                                                 modifier = Modifier.fillMaxSize()
                                             )
                                             MainNavDestination.GALLERY -> GalleryScreen(
@@ -377,6 +356,17 @@ fun HungCamApp(
                                                 onGoToCamera = { currentTab = MainNavDestination.CAMERA },
                                                 onOpenSettings = { subScreen = SubScreen.Settings },
                                                 onOpenVideoMerge = { subScreen = SubScreen.VideoMerge },
+                                                onOpenAiWithAsset = { asset ->
+                                                    viewModel.selectAssetForAiStudio(asset)
+                                                    currentTab = MainNavDestination.AI_STUDIO
+                                                },
+                                                onEditAsset = { asset ->
+                                                    if (asset.typeEnum == com.example.model.MediaItemType.VIDEO) {
+                                                        subScreen = SubScreen.VideoEdit(asset)
+                                                    } else {
+                                                        subScreen = SubScreen.PhotoEdit(asset)
+                                                    }
+                                                },
                                                 modifier = Modifier.fillMaxSize()
                                             )
                                             MainNavDestination.AI_STUDIO -> AiStudioScreen(

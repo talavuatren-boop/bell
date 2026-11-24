@@ -21,7 +21,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AspectRatio
-import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.BlurOn
 import androidx.compose.material.icons.outlined.BrandingWatermark
 import androidx.compose.material.icons.outlined.BrightnessHigh
@@ -33,7 +32,6 @@ import androidx.compose.material.icons.outlined.GridOn
 import androidx.compose.material.icons.outlined.Hd
 import androidx.compose.material.icons.outlined.HighQuality
 import androidx.compose.material.icons.outlined.Memory
-import androidx.compose.material.icons.outlined.MergeType
 import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.MicOff
 import androidx.compose.material.icons.outlined.MotionPhotosOn
@@ -71,6 +69,7 @@ import com.example.model.CameraMode
 import com.example.model.GridType
 import com.example.model.HdrMode
 import com.example.model.LivePhotoDuration
+import com.example.model.ModeColorStyle
 import com.example.model.PhotoFilterPreset
 import com.example.model.PhotoResolutionTier
 import com.example.model.ProCameraParameters
@@ -82,10 +81,13 @@ import com.example.model.TimelapseSpeed
 import com.example.ui.theme.CardSlate
 import com.example.ui.theme.HairlineBorder
 import com.example.ui.theme.LocalAccentColor
+import com.example.ui.theme.ModeMemeMagenta
+import com.example.ui.theme.ModeMoreIndigo
 import com.example.ui.theme.MonoTelemetrySmall
 import com.example.ui.theme.MutedSlate
 import com.example.ui.theme.PureBlack
 import com.example.ui.theme.PureWhite
+import com.example.ui.theme.resolveCameraModeColor
 
 data class QuickGridAction(
     val id: String,
@@ -137,9 +139,10 @@ fun ModeQuickControlGrid(
     onCycleTimelapseSpeed: () -> Unit,
     onOpenFilters: () -> Unit,
     onDismiss: () -> Unit,
+    modeAccentColor: Color? = null,
     modifier: Modifier = Modifier
 ) {
-    val accent = LocalAccentColor.current
+    val accent = modeAccentColor ?: LocalAccentColor.current
 
     val items: List<QuickGridAction> = remember(
         mode, settings, activeLens, liveDuration, selfTimer,
@@ -157,8 +160,8 @@ fun ModeQuickControlGrid(
                 ),
                 QuickGridAction(
                     id = "camera_ai",
-                    label = "AI Siêu nét",
-                    badgeText = "AI",
+                    label = "Siêu nét HD",
+                    badgeText = "HD+",
                     isActive = settings.cameraAiSuperSharpEnabled,
                     onClick = onToggleCameraAi
                 ),
@@ -250,8 +253,8 @@ fun ModeQuickControlGrid(
             CameraMode.VIDEO -> listOf(
                 QuickGridAction(
                     id = "camera_ai",
-                    label = "AI Siêu nét",
-                    badgeText = "AI",
+                    label = "Siêu nét HD",
+                    badgeText = "HD+",
                     isActive = settings.cameraAiSuperSharpEnabled,
                     onClick = onToggleCameraAi
                 ),
@@ -326,8 +329,8 @@ fun ModeQuickControlGrid(
                 ),
                 QuickGridAction(
                     id = "camera_ai",
-                    label = "AI Siêu nét",
-                    badgeText = "AI",
+                    label = "Siêu nét HD",
+                    badgeText = "HD+",
                     isActive = settings.cameraAiSuperSharpEnabled,
                     onClick = onToggleCameraAi
                 ),
@@ -405,8 +408,8 @@ fun ModeQuickControlGrid(
                 ),
                 QuickGridAction(
                     id = "camera_ai",
-                    label = "AI Siêu nét",
-                    badgeText = "AI",
+                    label = "Siêu nét HD",
+                    badgeText = "HD+",
                     isActive = settings.cameraAiSuperSharpEnabled,
                     onClick = onToggleCameraAi
                 ),
@@ -622,6 +625,7 @@ private data class MoreDrawerItem(
     val id: String,
     val title: String,
     val icon: ImageVector,
+    val accentColor: Color,
     val selected: Boolean = false,
     val testTag: String,
     val onClick: () -> Unit
@@ -632,9 +636,8 @@ fun MoreModesFlagshipSheet(
     visible: Boolean,
     currentMode: CameraMode,
     isMemeMode: Boolean,
+    modeColorStyle: ModeColorStyle = ModeColorStyle.DEFAULT_RED,
     onSelectMode: (CameraMode) -> Unit,
-    onOpenAiStudio: () -> Unit,
-    onOpenVideoMerge: () -> Unit,
     onOpenCapabilityReport: () -> Unit,
     onToggleMemeMode: () -> Unit,
     onDismiss: () -> Unit,
@@ -649,13 +652,27 @@ fun MoreModesFlagshipSheet(
         exit = HungCamMotion.sheetExit(animEnabled),
         modifier = modifier
     ) {
-        val entries = remember(currentMode, isMemeMode) {
+        val entries = remember(currentMode, isMemeMode, modeColorStyle, accent) {
+            val proColor = resolveCameraModeColor(CameraMode.PRO, modeColorStyle, accent)
+            val slowColor = resolveCameraModeColor(CameraMode.SLOW_MOTION, modeColorStyle, accent)
+            val timeColor = resolveCameraModeColor(CameraMode.TIMELAPSE, modeColorStyle, accent)
+            val memeColor = when (modeColorStyle) {
+                ModeColorStyle.DEFAULT_RED -> accent
+                ModeColorStyle.MONOCHROME_WHITE -> PureWhite
+                ModeColorStyle.PER_MODE_VIBRANT -> ModeMemeMagenta
+            }
+            val hwColor = when (modeColorStyle) {
+                ModeColorStyle.DEFAULT_RED -> accent
+                ModeColorStyle.MONOCHROME_WHITE -> PureWhite
+                ModeColorStyle.PER_MODE_VIBRANT -> ModeMoreIndigo
+            }
             buildList {
                 add(
                     MoreDrawerItem(
                         id = "pro",
                         title = "Chuyên nghiệp",
                         icon = Icons.Outlined.Tune,
+                        accentColor = proColor,
                         selected = currentMode == CameraMode.PRO,
                         testTag = "more_mode_pro",
                         onClick = { onSelectMode(CameraMode.PRO); onDismiss() }
@@ -666,6 +683,7 @@ fun MoreModesFlagshipSheet(
                         id = "meme",
                         title = if (isMemeMode) "Meme (Đang bật)" else "Chụp Meme",
                         icon = Icons.Outlined.EmojiEmotions,
+                        accentColor = memeColor,
                         selected = isMemeMode,
                         testTag = "more_mode_meme",
                         onClick = { onToggleMemeMode(); onDismiss() }
@@ -676,6 +694,7 @@ fun MoreModesFlagshipSheet(
                         id = "slowmo",
                         title = "Chuyển động chậm",
                         icon = Icons.Outlined.SlowMotionVideo,
+                        accentColor = slowColor,
                         selected = currentMode == CameraMode.SLOW_MOTION,
                         testTag = "more_mode_slow_motion",
                         onClick = { onSelectMode(CameraMode.SLOW_MOTION); onDismiss() }
@@ -686,6 +705,7 @@ fun MoreModesFlagshipSheet(
                         id = "timelapse",
                         title = "Chuyển động nhanh",
                         icon = Icons.Outlined.Speed,
+                        accentColor = timeColor,
                         selected = currentMode == CameraMode.TIMELAPSE,
                         testTag = "more_mode_timelapse",
                         onClick = { onSelectMode(CameraMode.TIMELAPSE); onDismiss() }
@@ -693,29 +713,10 @@ fun MoreModesFlagshipSheet(
                 )
                 add(
                     MoreDrawerItem(
-                        id = "ai_studio",
-                        title = "AI Studio",
-                        icon = Icons.Outlined.AutoAwesome,
-                        selected = false,
-                        testTag = "more_mode_ai_studio",
-                        onClick = { onDismiss(); onOpenAiStudio() }
-                    )
-                )
-                add(
-                    MoreDrawerItem(
-                        id = "video_merge",
-                        title = "Ghép Video",
-                        icon = Icons.Outlined.MergeType,
-                        selected = false,
-                        testTag = "more_mode_video_merge",
-                        onClick = { onDismiss(); onOpenVideoMerge() }
-                    )
-                )
-                add(
-                    MoreDrawerItem(
                         id = "hardware",
                         title = "Phần cứng",
                         icon = Icons.Outlined.Memory,
+                        accentColor = hwColor,
                         selected = false,
                         testTag = "more_mode_hardware",
                         onClick = { onDismiss(); onOpenCapabilityReport() }
@@ -771,16 +772,22 @@ fun MoreModesFlagshipSheet(
                                 horizontalAlignment = Alignment.CenterHorizontally,
                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
+                                val itemColor = item.accentColor
+                                val showModeTint = item.selected || modeColorStyle == ModeColorStyle.PER_MODE_VIBRANT
                                 Box(
                                     modifier = Modifier
                                         .size(46.dp)
                                         .clip(RoundedCornerShape(14.dp))
                                         .background(
-                                            if (item.selected) accent.copy(alpha = 0.16f) else CardSlate.copy(alpha = 0.45f)
+                                            when {
+                                                item.selected -> itemColor.copy(alpha = 0.20f)
+                                                modeColorStyle == ModeColorStyle.PER_MODE_VIBRANT -> itemColor.copy(alpha = 0.10f)
+                                                else -> CardSlate.copy(alpha = 0.45f)
+                                            }
                                         )
                                         .border(
-                                            width = if (item.selected) 1.dp else 0.75.dp,
-                                            color = if (item.selected) accent else HairlineBorder.copy(alpha = 0.55f),
+                                            width = if (item.selected) 1.2.dp else 0.75.dp,
+                                            color = if (showModeTint) itemColor.copy(alpha = if (item.selected) 1f else 0.42f) else HairlineBorder.copy(alpha = 0.55f),
                                             shape = RoundedCornerShape(14.dp)
                                         ),
                                     contentAlignment = Alignment.Center
@@ -788,7 +795,7 @@ fun MoreModesFlagshipSheet(
                                     Icon(
                                         imageVector = item.icon,
                                         contentDescription = item.title,
-                                        tint = if (item.selected) accent else PureWhite,
+                                        tint = if (showModeTint) itemColor else PureWhite,
                                         modifier = Modifier.size(24.dp)
                                     )
                                 }
@@ -798,7 +805,7 @@ fun MoreModesFlagshipSheet(
                                         fontSize = 12.sp,
                                         fontWeight = if (item.selected) FontWeight.Bold else FontWeight.Medium
                                     ),
-                                    color = if (item.selected) accent else PureWhite,
+                                    color = if (item.selected) itemColor else PureWhite,
                                     textAlign = TextAlign.Center,
                                     maxLines = 2
                                 )

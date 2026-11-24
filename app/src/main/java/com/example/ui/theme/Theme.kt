@@ -89,3 +89,27 @@ fun HungCamTheme(
         )
     }
 }
+
+fun resolveAccentPreviewColor(preset: AccentColorPreset): Color = when (preset) {
+    AccentColorPreset.CRIMSON_PRO -> CrimsonLeica
+    AccentColorPreset.PURE_WHITE -> PureWhite
+    AccentColorPreset.ELECTRIC_CYAN -> ElectricCyan
+    AccentColorPreset.EMERALD -> EmeraldOptical
+}
+
+fun resolveCameraModeColor(
+    mode: com.example.model.CameraMode,
+    style: com.example.model.ModeColorStyle,
+    fallbackAccent: Color = CrimsonLeica
+): Color = when (style) {
+    com.example.model.ModeColorStyle.DEFAULT_RED -> fallbackAccent
+    com.example.model.ModeColorStyle.MONOCHROME_WHITE -> PureWhite
+    com.example.model.ModeColorStyle.PER_MODE_VIBRANT -> when (mode) {
+        com.example.model.CameraMode.PRO -> ModeProCyan
+        com.example.model.CameraMode.VIDEO -> ModeVideoCoral
+        com.example.model.CameraMode.PHOTO -> ModePhotoCrimson
+        com.example.model.CameraMode.PORTRAIT -> ModePortraitRose
+        com.example.model.CameraMode.SLOW_MOTION -> ModeSlowMoEmerald
+        com.example.model.CameraMode.TIMELAPSE -> ModeTimelapseViolet
+    }
+}

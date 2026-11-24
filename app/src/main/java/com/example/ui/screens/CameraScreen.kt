@@ -54,7 +54,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.BlurOn
 import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.Close
@@ -71,6 +70,7 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.outlined.FilterVintage
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -113,6 +113,7 @@ import com.example.model.FlashMode
 import com.example.model.HdrMode
 import com.example.model.LivePhotoDuration
 import com.example.model.MediaItemType
+import com.example.model.ModeColorStyle
 import com.example.model.PhotoFilterPreset
 import com.example.model.PhotoResolutionTier
 import com.example.model.ProCaptureType
@@ -144,11 +145,13 @@ import com.example.ui.theme.ElevatedObsidian
 import com.example.ui.theme.HairlineBorder
 import com.example.ui.theme.LocalAccentColor
 import com.example.ui.theme.LocalOnAccentColor
+import com.example.ui.theme.ModeMoreIndigo
 import com.example.ui.theme.MonoTelemetryLarge
 import com.example.ui.theme.MonoTelemetrySmall
 import com.example.ui.theme.MutedSlate
 import com.example.ui.theme.PureBlack
 import com.example.ui.theme.PureWhite
+import com.example.ui.theme.resolveCameraModeColor
 import kotlinx.coroutines.delay
 
 @Composable
@@ -156,10 +159,8 @@ fun CameraScreen(
     viewModel: MainViewModel,
     onOpenGallery: () -> Unit,
     onOpenSettings: () -> Unit = {},
-    onOpenAiStudio: () -> Unit = {},
     onOpenCapabilityReport: () -> Unit = {},
     onOpenStickersMeme: (MediaAssetEntity) -> Unit = {},
-    onOpenVideoMerge: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -184,6 +185,12 @@ fun CameraScreen(
     val filterIntensity by viewModel.cameraFilterIntensity.collectAsStateWithLifecycle()
     val isMemeMode by viewModel.isMemeCaptureMode.collectAsStateWithLifecycle()
     val assets by viewModel.activeAssets.collectAsStateWithLifecycle()
+    val activeModeColor by animateColorAsState(
+        targetValue = resolveCameraModeColor(mode, settings.modeColorStyle, accent),
+        animationSpec = tween(200),
+        label = "activeModeColor"
+    )
+    val onActiveModeColor = if (activeModeColor == PureWhite) PureBlack else PureWhite
 
     var hasCameraPerm by remember {
         mutableStateOf(
@@ -362,16 +369,16 @@ fun CameraScreen(
                                 .clickable(interactionSource = liveInt, indication = null) {
                                     viewModel.cycleLiveDuration()
                                 }
-                                .padding(horizontal = 8.dp, vertical = 6.dp)
+                                .padding(horizontal = 7.dp, vertical = 6.dp)
                                 .testTag("camera_live_toggle"),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            horizontalArrangement = Arrangement.spacedBy(3.dp)
                         ) {
                             Icon(
                                 imageVector = Icons.Default.MotionPhotosOn,
                                 contentDescription = "Live Photo ${liveDuration.label}",
                                 tint = if (liveDuration != LivePhotoDuration.OFF) accent else PureWhite,
-                                modifier = Modifier.size(21.dp)
+                                modifier = Modifier.size(20.dp)
                             )
                             if (liveDuration != LivePhotoDuration.OFF) {
                                 Text(
@@ -381,6 +388,23 @@ fun CameraScreen(
                                 )
                             }
                         }
+                        val hdrActive = settings.hdrMode != HdrMode.OFF
+                        Text(
+                            text = settings.hdrMode.badgeLabel,
+                            style = MonoTelemetrySmall.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold),
+                            color = if (hdrActive) accent else PureWhite.copy(alpha = 0.7f),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(if (hdrActive) accent.copy(alpha = 0.14f) else ElevatedObsidian)
+                                .border(
+                                    0.75.dp,
+                                    if (hdrActive) accent.copy(alpha = 0.55f) else HairlineBorder,
+                                    RoundedCornerShape(10.dp)
+                                )
+                                .clickable { viewModel.cycleHdrMode() }
+                                .padding(horizontal = 7.dp, vertical = 4.dp)
+                                .testTag("camera_viewfinder_hdr_pill")
+                        )
                     }
 
                     CameraMode.VIDEO -> {
@@ -417,12 +441,30 @@ fun CameraScreen(
                         Text(
                             text = String.format("f/%.1f", fAperture),
                             style = MonoTelemetrySmall.copy(fontWeight = FontWeight.Bold),
-                            color = accent,
+                            color = activeModeColor,
                             modifier = Modifier
                                 .clip(RoundedCornerShape(12.dp))
-                                .background(ElevatedObsidian)
+                                .background(activeModeColor.copy(alpha = 0.14f))
+                                .border(0.75.dp, activeModeColor.copy(alpha = 0.55f), RoundedCornerShape(12.dp))
                                 .clickable { showPortraitBokehBar = !showPortraitBokehBar }
                                 .padding(horizontal = 9.dp, vertical = 5.dp)
+                        )
+                        val hdrActive = settings.hdrMode != HdrMode.OFF
+                        Text(
+                            text = settings.hdrMode.badgeLabel,
+                            style = MonoTelemetrySmall.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold),
+                            color = if (hdrActive) accent else PureWhite.copy(alpha = 0.7f),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(if (hdrActive) accent.copy(alpha = 0.14f) else ElevatedObsidian)
+                                .border(
+                                    0.75.dp,
+                                    if (hdrActive) accent.copy(alpha = 0.55f) else HairlineBorder,
+                                    RoundedCornerShape(10.dp)
+                                )
+                                .clickable { viewModel.cycleHdrMode() }
+                                .padding(horizontal = 7.dp, vertical = 4.dp)
+                                .testTag("camera_viewfinder_hdr_pill")
                         )
                     }
 
@@ -434,10 +476,10 @@ fun CameraScreen(
                             Text(
                                 text = proCaptureType.label,
                                 style = MonoTelemetrySmall.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold),
-                                color = onAccent,
+                                color = onActiveModeColor,
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(10.dp))
-                                    .background(accent)
+                                    .background(activeModeColor)
                                     .clickable(enabled = !runtime.isRecording) {
                                         val next = if (proCaptureType == ProCaptureType.PHOTO) ProCaptureType.VIDEO else ProCaptureType.PHOTO
                                         viewModel.setProCaptureType(next)
@@ -449,7 +491,7 @@ fun CameraScreen(
                                 Text(
                                     text = "RAW",
                                     style = MonoTelemetrySmall.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold),
-                                    color = accent
+                                    color = activeModeColor
                                 )
                             }
                         }
@@ -460,10 +502,11 @@ fun CameraScreen(
                         Text(
                             text = slowMoOption?.label ?: "Slow-Mo",
                             style = MonoTelemetrySmall.copy(fontWeight = FontWeight.Bold),
-                            color = accent,
+                            color = activeModeColor,
                             modifier = Modifier
                                 .clip(RoundedCornerShape(12.dp))
-                                .background(ElevatedObsidian)
+                                .background(activeModeColor.copy(alpha = 0.14f))
+                                .border(0.75.dp, activeModeColor.copy(alpha = 0.55f), RoundedCornerShape(12.dp))
                                 .clickable(enabled = options.isNotEmpty() && !runtime.isRecording) {
                                     val idx = options.indexOf(slowMoOption)
                                     viewModel.setSlowMoOption(options[(idx + 1) % options.size])
@@ -477,10 +520,11 @@ fun CameraScreen(
                         Text(
                             text = timelapseSpeed.label,
                             style = MonoTelemetrySmall.copy(fontWeight = FontWeight.Bold),
-                            color = accent,
+                            color = activeModeColor,
                             modifier = Modifier
                                 .clip(RoundedCornerShape(12.dp))
-                                .background(ElevatedObsidian)
+                                .background(activeModeColor.copy(alpha = 0.14f))
+                                .border(0.75.dp, activeModeColor.copy(alpha = 0.55f), RoundedCornerShape(12.dp))
                                 .clickable(enabled = !runtime.isRecording) {
                                     val idx = speeds.indexOf(timelapseSpeed)
                                     viewModel.setTimelapseSpeed(speeds[(idx + 1) % speeds.size])
@@ -692,7 +736,12 @@ fun CameraScreen(
                         factory = { ctx ->
                             val rot = getDisplayRotationDegrees(ctx)
                             TextureView(ctx).also { tv ->
-                                tv.setLayerType(android.view.View.LAYER_TYPE_HARDWARE, liveFilterPaint)
+                                val layerType = if (liveFilterPaint == null) {
+                                    android.view.View.LAYER_TYPE_NONE
+                                } else {
+                                    android.view.View.LAYER_TYPE_HARDWARE
+                                }
+                                tv.setLayerType(layerType, liveFilterPaint)
                                 tv.setLayerPaint(liveFilterPaint)
                                 lastAppliedState[0] = filterKey
                                 lastAppliedState[1] = rot
@@ -706,7 +755,12 @@ fun CameraScreen(
                         },
                         update = { tv ->
                             if (lastAppliedState[0] != filterKey) {
-                                tv.setLayerType(android.view.View.LAYER_TYPE_HARDWARE, liveFilterPaint)
+                                val layerType = if (liveFilterPaint == null) {
+                                    android.view.View.LAYER_TYPE_NONE
+                                } else {
+                                    android.view.View.LAYER_TYPE_HARDWARE
+                                }
+                                tv.setLayerType(layerType, liveFilterPaint)
                                 tv.setLayerPaint(liveFilterPaint)
                                 tv.invalidate()
                                 lastAppliedState[0] = filterKey
@@ -798,52 +852,7 @@ fun CameraScreen(
                 }
             }
 
-            // Top-Right Viewfinder Compact Status Pills: HDR+ (Always/Auto) & AI Super-Sharp
-            if (!runtime.isRecording) {
-                Row(
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(10.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    if (mode == CameraMode.PHOTO || mode == CameraMode.PORTRAIT) {
-                        val hdrActive = settings.hdrMode != HdrMode.OFF
-                        Text(
-                            text = settings.hdrMode.badgeLabel,
-                            style = MonoTelemetrySmall.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold),
-                            color = if (hdrActive) accent else PureWhite.copy(alpha = 0.65f),
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(Color.Black.copy(alpha = 0.56f))
-                                .border(
-                                    0.75.dp,
-                                    if (hdrActive) accent.copy(alpha = 0.65f) else HairlineBorder,
-                                    RoundedCornerShape(10.dp)
-                                )
-                                .clickable { viewModel.cycleHdrMode() }
-                                .padding(horizontal = 8.dp, vertical = 4.dp)
-                                .testTag("camera_viewfinder_hdr_pill")
-                        )
-                    }
-                    Text(
-                        text = if (settings.cameraAiSuperSharpEnabled) "AI Nét" else "AI Tắt",
-                        style = MonoTelemetrySmall.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold),
-                        color = if (settings.cameraAiSuperSharpEnabled) accent else PureWhite.copy(alpha = 0.65f),
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(Color.Black.copy(alpha = 0.56f))
-                            .border(
-                                0.75.dp,
-                                if (settings.cameraAiSuperSharpEnabled) accent.copy(alpha = 0.65f) else HairlineBorder,
-                                RoundedCornerShape(10.dp)
-                            )
-                            .clickable { viewModel.toggleCameraAiSuperSharp() }
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                            .testTag("camera_viewfinder_ai_pill")
-                    )
-                }
-            }
+            // Clean viewfinder: HDR control is neatly placed in the Top Bar without obstructing preview corners
 
             // Active Meme Mode Prompt Pill (Shoot -> Auto Open Sticker & Meme Editor)
             Box(
@@ -1019,6 +1028,7 @@ fun CameraScreen(
                 },
                 onOpenFilters = { showFilterStrip = true },
                 onDismiss = { showQuickGrid = false },
+                modeAccentColor = activeModeColor,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(bottom = 8.dp)
@@ -1198,7 +1208,7 @@ fun CameraScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
-                            imageVector = Icons.Default.AutoAwesome,
+                            imageVector = Icons.Outlined.FilterVintage,
                             contentDescription = "Bộ lọc Leica & Máy ảnh",
                             tint = filterIconTint,
                             modifier = Modifier.size(19.dp)
@@ -1356,14 +1366,15 @@ fun CameraScreen(
                     }
             )
 
-            // Centered Flagship Mode Strip: PRO | VIDEO | ẢNH | CHÂN DUNG | THÊM
+            // Centered Flagship Colored Pill Mode Strip: CHUYÊN NGHIỆP | VIDEO | ẢNH | CHÂN DUNG | THÊM
             val isExtraModeActive = mode == CameraMode.SLOW_MOTION || mode == CameraMode.TIMELAPSE
+            val isMulticolorMode = settings.modeColorStyle == ModeColorStyle.PER_MODE_VIBRANT
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .horizontalScroll(rememberScrollState())
                     .padding(horizontal = 12.dp),
-                horizontalArrangement = Arrangement.spacedBy(18.dp, Alignment.CenterHorizontally),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 val barModes = listOf(
@@ -1374,16 +1385,46 @@ fun CameraScreen(
                 )
                 barModes.forEach { itemMode ->
                     val selected = mode == itemMode
+                    val itemColor = resolveCameraModeColor(itemMode, settings.modeColorStyle, accent)
+                    val isLightChip = itemColor == PureWhite
                     val modeInteraction = remember(itemMode) { MutableInteractionSource() }
+                    val pillBgColor by animateColorAsState(
+                        targetValue = when {
+                            selected && isLightChip -> PureWhite
+                            selected -> itemColor.copy(alpha = 0.24f)
+                            isMulticolorMode -> itemColor.copy(alpha = 0.08f)
+                            else -> Color.Transparent
+                        },
+                        animationSpec = tween(180),
+                        label = "modePillBg_${itemMode.name}"
+                    )
+                    val pillBorderColor by animateColorAsState(
+                        targetValue = when {
+                            selected -> itemColor.copy(alpha = 0.88f)
+                            isMulticolorMode -> itemColor.copy(alpha = 0.30f)
+                            else -> Color.Transparent
+                        },
+                        animationSpec = tween(180),
+                        label = "modePillBorder_${itemMode.name}"
+                    )
                     val modeTextColor by animateColorAsState(
-                        targetValue = if (selected) accent else PureWhite.copy(alpha = 0.65f),
+                        targetValue = when {
+                            selected && isLightChip -> PureBlack
+                            selected -> PureWhite
+                            isMulticolorMode -> PureWhite.copy(alpha = 0.86f)
+                            else -> PureWhite.copy(alpha = 0.65f)
+                        },
                         animationSpec = tween(160),
                         label = "modeTextColor_${itemMode.name}"
                     )
-                    val dotWidth by animateDpAsState(
-                        targetValue = if (selected) 14.dp else 0.dp,
+                    val dotSize by animateDpAsState(
+                        targetValue = when {
+                            selected && !isLightChip -> 6.dp
+                            isMulticolorMode -> 5.dp
+                            else -> 0.dp
+                        },
                         animationSpec = if (animEnabled) spring(dampingRatio = 0.78f, stiffness = 480f) else tween(0),
-                        label = "modeDotWidth_${itemMode.name}"
+                        label = "modeDotSize_${itemMode.name}"
                     )
                     val labelText = when (itemMode) {
                         CameraMode.PRO -> "Chuyên nghiệp"
@@ -1392,32 +1433,42 @@ fun CameraScreen(
                         CameraMode.PORTRAIT -> "Chân dung"
                         else -> itemMode.flagshipLabel()
                     }
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(if (dotSize > 0.dp) 6.dp else 0.dp),
                         modifier = Modifier
+                            .height(36.dp)
                             .springPressScale(modeInteraction, pressedScale = 0.90f)
+                            .clip(RoundedCornerShape(18.dp))
+                            .background(pillBgColor)
+                            .border(
+                                width = if (selected) 1.dp else 0.75.dp,
+                                color = pillBorderColor,
+                                shape = RoundedCornerShape(18.dp)
+                            )
                             .clickable(interactionSource = modeInteraction, indication = null) {
                                 showMoreModesPanel = false
                                 viewModel.setCameraMode(itemMode)
                             }
-                            .padding(vertical = 4.dp)
+                            .padding(horizontal = if (selected || isMulticolorMode) 12.dp else 10.dp)
                             .testTag("mode_tab_${itemMode.name.lowercase()}")
                     ) {
+                        if (dotSize > 0.dp) {
+                            Box(
+                                modifier = Modifier
+                                    .size(dotSize)
+                                    .clip(CircleShape)
+                                    .background(itemColor)
+                            )
+                        }
                         Text(
                             text = labelText,
                             style = MaterialTheme.typography.labelLarge.copy(
-                                fontSize = 13.5.sp,
+                                fontSize = 13.sp,
                                 fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
                             ),
-                            color = modeTextColor
-                        )
-                        Spacer(modifier = Modifier.height(3.dp))
-                        Box(
-                            modifier = Modifier
-                                .width(dotWidth)
-                                .height(3.dp)
-                                .clip(CircleShape)
-                                .background(accent)
+                            color = modeTextColor,
+                            maxLines = 1
                         )
                     }
                 }
@@ -1425,41 +1476,86 @@ fun CameraScreen(
                 // "Thêm" Mode Drawer Trigger
                 val moreInteraction = remember { MutableInteractionSource() }
                 val moreActive = isExtraModeActive || showMoreModesPanel
+                val moreColor = when {
+                    isExtraModeActive -> resolveCameraModeColor(mode, settings.modeColorStyle, accent)
+                    isMulticolorMode -> ModeMoreIndigo
+                    settings.modeColorStyle == ModeColorStyle.MONOCHROME_WHITE -> PureWhite
+                    else -> accent
+                }
+                val isLightMore = moreColor == PureWhite
+                val morePillBg by animateColorAsState(
+                    targetValue = when {
+                        moreActive && isLightMore -> PureWhite
+                        moreActive -> moreColor.copy(alpha = 0.24f)
+                        isMulticolorMode -> moreColor.copy(alpha = 0.08f)
+                        else -> Color.Transparent
+                    },
+                    animationSpec = tween(180),
+                    label = "morePillBg"
+                )
+                val morePillBorder by animateColorAsState(
+                    targetValue = when {
+                        moreActive -> moreColor.copy(alpha = 0.88f)
+                        isMulticolorMode -> moreColor.copy(alpha = 0.30f)
+                        else -> Color.Transparent
+                    },
+                    animationSpec = tween(180),
+                    label = "morePillBorder"
+                )
                 val moreTextColor by animateColorAsState(
-                    targetValue = if (moreActive) accent else PureWhite.copy(alpha = 0.65f),
+                    targetValue = when {
+                        moreActive && isLightMore -> PureBlack
+                        moreActive -> PureWhite
+                        isMulticolorMode -> PureWhite.copy(alpha = 0.86f)
+                        else -> PureWhite.copy(alpha = 0.65f)
+                    },
                     animationSpec = tween(160),
                     label = "moreModeTextColor"
                 )
-                val moreDotWidth by animateDpAsState(
-                    targetValue = if (isExtraModeActive) 14.dp else 0.dp,
+                val moreDotSize by animateDpAsState(
+                    targetValue = when {
+                        moreActive && !isLightMore -> 6.dp
+                        isMulticolorMode -> 5.dp
+                        else -> 0.dp
+                    },
                     animationSpec = if (animEnabled) spring(dampingRatio = 0.78f, stiffness = 480f) else tween(0),
-                    label = "moreModeDotWidth"
+                    label = "moreModeDotSize"
                 )
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(if (moreDotSize > 0.dp) 6.dp else 0.dp),
                     modifier = Modifier
+                        .height(36.dp)
                         .springPressScale(moreInteraction, pressedScale = 0.90f)
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(morePillBg)
+                        .border(
+                            width = if (moreActive) 1.dp else 0.75.dp,
+                            color = morePillBorder,
+                            shape = RoundedCornerShape(18.dp)
+                        )
                         .clickable(interactionSource = moreInteraction, indication = null, enabled = !runtime.isRecording) {
                             showMoreModesPanel = !showMoreModesPanel
                         }
-                        .padding(vertical = 4.dp)
+                        .padding(horizontal = if (moreActive || isMulticolorMode) 12.dp else 10.dp)
                         .testTag("mode_tab_more")
                 ) {
+                    if (moreDotSize > 0.dp) {
+                        Box(
+                            modifier = Modifier
+                                .size(moreDotSize)
+                                .clip(CircleShape)
+                                .background(moreColor)
+                        )
+                    }
                     Text(
                         text = if (isExtraModeActive) mode.flagshipLabel() else "Thêm",
                         style = MaterialTheme.typography.labelLarge.copy(
-                            fontSize = 13.5.sp,
+                            fontSize = 13.sp,
                             fontWeight = if (moreActive) FontWeight.Bold else FontWeight.Medium
                         ),
-                        color = moreTextColor
-                    )
-                    Spacer(modifier = Modifier.height(3.dp))
-                    Box(
-                        modifier = Modifier
-                            .width(moreDotWidth)
-                            .height(3.dp)
-                            .clip(CircleShape)
-                            .background(accent)
+                        color = moreTextColor,
+                        maxLines = 1
                     )
                 }
             }
@@ -1518,8 +1614,16 @@ fun CameraScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         if (latest != null) {
+                            val thumbRequest = remember(latest.mediaStoreUri, context) {
+                                coil.request.ImageRequest.Builder(context)
+                                    .data(latest.mediaStoreUri)
+                                    .size(160)
+                                    .precision(coil.size.Precision.INEXACT)
+                                    .bitmapConfig(android.graphics.Bitmap.Config.RGB_565)
+                                    .build()
+                            }
                             AsyncImage(
-                                model = latest.mediaStoreUri,
+                                model = thumbRequest,
                                 contentDescription = "Mở Thư viện",
                                 contentScale = ContentScale.Crop,
                                 modifier = Modifier.fillMaxSize()
@@ -1679,9 +1783,8 @@ fun CameraScreen(
             visible = showMoreModesPanel,
             currentMode = mode,
             isMemeMode = isMemeMode,
+            modeColorStyle = settings.modeColorStyle,
             onSelectMode = { viewModel.setCameraMode(it) },
-            onOpenAiStudio = onOpenAiStudio,
-            onOpenVideoMerge = onOpenVideoMerge,
             onOpenCapabilityReport = onOpenCapabilityReport,
             onToggleMemeMode = { viewModel.setMemeCaptureMode(!isMemeMode) },
             onDismiss = { showMoreModesPanel = false }

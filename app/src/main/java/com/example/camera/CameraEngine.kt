@@ -169,8 +169,20 @@ class CameraEngine(
     private var zoomAnimationJob: Job? = null
     private var displayRotationDegrees: Int = 0
 
+    private val isWeakHardware = DevicePerformanceProfile.isLowEndHardware(context)
+    private val effectiveLowEnd: Boolean
+        get() = isWeakHardware || currentSettings.lowEndOptimizedMode
+
     @Volatile
     private var lastAnalysisTimestampMs: Long = 0L
+    @Volatile
+    private var lastMeteringEmitMs: Long = 0L
+    @Volatile
+    private var lastEmittedIso: Int? = null
+    @Volatile
+    private var lastEmittedExpNs: Long? = null
+    private val reusedYuvBins = IntArray(32)
+    private val reusedEdgeGrid = FloatArray(40 * 30)
     @Volatile
     private var lastCaptureResult: TotalCaptureResult? = null
     @Volatile
@@ -262,7 +274,8 @@ class CameraEngine(
             currentSettings.videoResolution != settings.videoResolution ||
             currentSettings.videoFps != settings.videoFps ||
             currentSettings.livePhotoSoundEnabled != settings.livePhotoSoundEnabled ||
-            currentSettings.livePhotoHighBitrate != settings.livePhotoHighBitrate
+            currentSettings.livePhotoHighBitrate != settings.livePhotoHighBitrate ||
+            currentSettings.lowEndOptimizedMode != settings.lowEndOptimizedMode
 
         activeLens = lens
         currentMode = mode
@@ -679,14 +692,15 @@ class CameraEngine(
                 .ifEmpty { map?.getOutputSizes(MediaRecorder::class.java)?.toList().orEmpty() }
             val prefer16By9 = currentSettings.aspectRatio == com.example.model.AspectRatioMode.RATIO_16_9 ||
                 currentSettings.aspectRatio == com.example.model.AspectRatioMode.FULL_SCREEN
-            val liveSize = if (capLiveStillTo1080p) {
+            val preferLowEndLive = effectiveLowEnd || capLiveStillTo1080p
+            val liveSize = if (preferLowEndLive) {
                 if (prefer16By9) {
                     codecSizes.firstOrNull { it.width == 960 && it.height == 540 }
                         ?: codecSizes.firstOrNull { it.width == 1280 && it.height == 720 }
                         ?: Size(960, 540)
                 } else {
-                    codecSizes.firstOrNull { it.width == 960 && it.height == 720 }
-                        ?: codecSizes.firstOrNull { it.width == 640 && it.height == 480 }
+                    codecSizes.firstOrNull { it.width == 640 && it.height == 480 }
+                        ?: codecSizes.firstOrNull { it.width == 960 && it.height == 720 }
                         ?: Size(640, 480)
                 }
             } else if (prefer16By9) {
@@ -705,9 +719,13 @@ class CameraEngine(
             val buf = LivePhotoRingBuffer(
                 width = liveSize.width,
                 height = liveSize.height,
-                bitrateBps = if (currentSettings.livePhotoHighBitrate) 14_000_000 else 9_000_000,
+                bitrateBps = when {
+                    effectiveLowEnd -> 8_000_000
+                    currentSettings.livePhotoHighBitrate -> 14_000_000
+                    else -> 9_000_000
+                },
                 fps = 30,
-                maxBufferSeconds = 14
+                maxBufferSeconds = if (effectiveLowEnd) 11 else 14
             )
             if (buf.start(enableAudio = currentSettings.livePhotoSoundEnabled)) {
                 livePhotoBuffer = buf
@@ -1007,10 +1025,24 @@ class CameraEngine(
             result: TotalCaptureResult
         ) {
             lastCaptureResult = result
+            if (currentMode != CameraMode.PRO) return
+            val now = SystemClock.elapsedRealtime()
+            val minGap = if (effectiveLowEnd) 380L else 260L
+            if (now - lastMeteringEmitMs < minGap) return
+
             val iso = result.get(CaptureResult.SENSOR_SENSITIVITY)
             val exp = result.get(CaptureResult.SENSOR_EXPOSURE_TIME)
             if (iso != null || exp != null) {
-                _liveMeteringInfo.value = iso to exp
+                val prevIso = lastEmittedIso
+                val prevExp = lastEmittedExpNs
+                val isoChanged = prevIso == null || (iso != null && abs(iso - prevIso) >= 5)
+                val expChanged = prevExp == null || (exp != null && prevExp > 0L && abs(exp - prevExp) * 20L >= prevExp)
+                if (isoChanged || expChanged) {
+                    lastMeteringEmitMs = now
+                    lastEmittedIso = iso
+                    lastEmittedExpNs = exp
+                    _liveMeteringInfo.value = iso to exp
+                }
             }
         }
     }
@@ -2208,31 +2240,33 @@ class CameraEngine(
     }
 
     private fun analyzeYuvFrame(image: Image) {
+        if (currentMode != CameraMode.PRO) return
         val now = SystemClock.elapsedRealtime()
-        if (now - lastAnalysisTimestampMs < 130L) return
+        val intervalMs = if (effectiveLowEnd) 380L else 220L
+        if (now - lastAnalysisTimestampMs < intervalMs) return
         lastAnalysisTimestampMs = now
 
         val yPlane = image.planes[0]
         val yBuffer = yPlane.buffer
+        val yLimit = yBuffer.limit()
         val rowStride = yPlane.rowStride
         val pixelStride = yPlane.pixelStride
         val w = image.width
         val h = image.height
 
-        val bins = IntArray(32)
+        reusedYuvBins.fill(0)
         var totalSamples = 0
         var highlightClipped = 0
         var shadowClipped = 0
 
-        val stepX = 4
-        val stepY = 4
-        for (y in 0 until h step stepY) {
+        val step = if (effectiveLowEnd) 6 else 4
+        for (y in 0 until h step step) {
             val rowBase = y * rowStride
-            for (x in 0 until w step stepX) {
+            for (x in 0 until w step step) {
                 val idx = rowBase + x * pixelStride
-                if (idx < yBuffer.limit()) {
+                if (idx < yLimit) {
                     val lum = yBuffer.get(idx).toInt() and 0xFF
-                    bins[(lum shr 3).coerceIn(0, 31)]++
+                    reusedYuvBins[(lum shr 3).coerceIn(0, 31)]++
                     if (lum >= 248) highlightClipped++
                     if (lum <= 8) shadowClipped++
                     totalSamples++
@@ -2241,8 +2275,12 @@ class CameraEngine(
         }
 
         if (totalSamples > 0) {
-            val maxBin = bins.maxOrNull()?.coerceAtLeast(1) ?: 1
-            _histogramBins.value = bins.map { it.toFloat() / maxBin.toFloat() }
+            var maxBin = 1
+            for (i in 0 until 32) {
+                if (reusedYuvBins[i] > maxBin) maxBin = reusedYuvBins[i]
+            }
+            val invMax = 1f / maxBin.toFloat()
+            _histogramBins.value = List(32) { idx -> reusedYuvBins[idx] * invMax }
             _clippingStats.value = (highlightClipped * 100f / totalSamples) to (shadowClipped * 100f / totalSamples)
         }
 
@@ -2251,7 +2289,6 @@ class CameraEngine(
             val gridRows = 30
             val cellW = (w / gridCols).coerceAtLeast(2)
             val cellH = (h / gridRows).coerceAtLeast(2)
-            val edgeGrid = FloatArray(gridCols * gridRows)
             for (gr in 0 until gridRows) {
                 val py = (gr * cellH + cellH / 2).coerceIn(1, h - 2)
                 for (gc in 0 until gridCols) {
@@ -2259,16 +2296,16 @@ class CameraEngine(
                     val cIdx = py * rowStride + px * pixelStride
                     val rIdx = py * rowStride + (px + 1) * pixelStride
                     val dIdx = (py + 1) * rowStride + px * pixelStride
-                    if (rIdx < yBuffer.limit() && dIdx < yBuffer.limit()) {
+                    reusedEdgeGrid[gr * gridCols + gc] = if (rIdx < yLimit && dIdx < yLimit) {
                         val c = yBuffer.get(cIdx).toInt() and 0xFF
                         val r = yBuffer.get(rIdx).toInt() and 0xFF
                         val d = yBuffer.get(dIdx).toInt() and 0xFF
                         val grad = (abs(r - c) + abs(d - c)) / 255f
-                        edgeGrid[gr * gridCols + gc] = if (grad > 0.16f) grad.coerceIn(0f, 1f) else 0f
-                    }
+                        if (grad > 0.16f) grad.coerceIn(0f, 1f) else 0f
+                    } else 0f
                 }
             }
-            _focusPeaking.value = FocusPeakingOverlayData(gridCols, gridRows, edgeGrid)
+            _focusPeaking.value = FocusPeakingOverlayData(gridCols, gridRows, reusedEdgeGrid.copyOf())
         }
     }
 
@@ -2288,8 +2325,10 @@ class CameraEngine(
                 }
             }
         }
-        val bounded = choices.filter { it.width <= 1920 && it.height <= 1440 }
-        val pool = bounded.ifEmpty { choices.toList() }
+        val maxW = if (effectiveLowEnd) 1280 else 1920
+        val maxH = if (effectiveLowEnd) 960 else 1440
+        val bounded = choices.filter { it.width <= maxW && it.height <= maxH }
+        val pool = bounded.ifEmpty { choices.filter { it.width <= 1920 && it.height <= 1440 }.ifEmpty { choices.toList() } }
         return pool.minByOrNull { size ->
             val r = size.width.toFloat() / size.height.toFloat().coerceAtLeast(1f)
             abs(r - targetRatio) * 1000f - (size.width * size.height) / 1_000_000f

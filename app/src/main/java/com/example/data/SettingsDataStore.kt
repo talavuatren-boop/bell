@@ -14,6 +14,7 @@ import com.example.model.CameraMode
 import com.example.model.GridType
 import com.example.model.HdrMode
 import com.example.model.LivePhotoDuration
+import com.example.model.ModeColorStyle
 import com.example.model.PhotoFormat
 import com.example.model.PhotoResolutionTier
 import com.example.model.StabilizationMode
@@ -55,11 +56,13 @@ data class HungCamSettings(
     val aiAutoSharpen: Boolean = true,
     val aiAutoStabilize: Boolean = true,
     val aiLocalProcessingOnly: Boolean = true,
-    // Interface settings
+    // Interface & Performance settings
     val darkModeEnabled: Boolean = true,
     val accentColorPreset: AccentColorPreset = AccentColorPreset.CRIMSON_PRO,
+    val modeColorStyle: ModeColorStyle = ModeColorStyle.DEFAULT_RED,
     val hapticFeedbackEnabled: Boolean = true,
     val animationsEnabled: Boolean = true,
+    val lowEndOptimizedMode: Boolean = false,
     // Privacy settings
     val locationMetadataEnabled: Boolean = false
 ) {
@@ -98,8 +101,10 @@ class SettingsDataStore(private val context: Context) {
         val AI_LOCAL_ONLY = booleanPreferencesKey("ai_local_only")
         val DARK_MODE = booleanPreferencesKey("dark_mode")
         val ACCENT_PRESET = stringPreferencesKey("accent_preset")
+        val MODE_COLOR_STYLE = stringPreferencesKey("mode_color_style")
         val HAPTICS = booleanPreferencesKey("haptics")
         val ANIMATIONS = booleanPreferencesKey("animations")
+        val LOW_END_MODE = booleanPreferencesKey("low_end_optimized_mode")
         val LOCATION_META = booleanPreferencesKey("location_meta")
     }
 
@@ -135,8 +140,10 @@ class SettingsDataStore(private val context: Context) {
             aiLocalProcessingOnly = prefs[Keys.AI_LOCAL_ONLY] ?: true,
             darkModeEnabled = prefs[Keys.DARK_MODE] ?: true,
             accentColorPreset = enumValueOrDefault(prefs[Keys.ACCENT_PRESET], AccentColorPreset.CRIMSON_PRO),
+            modeColorStyle = enumValueOrDefault(prefs[Keys.MODE_COLOR_STYLE], ModeColorStyle.DEFAULT_RED),
             hapticFeedbackEnabled = prefs[Keys.HAPTICS] ?: true,
             animationsEnabled = prefs[Keys.ANIMATIONS] ?: true,
+            lowEndOptimizedMode = prefs[Keys.LOW_END_MODE] ?: false,
             locationMetadataEnabled = prefs[Keys.LOCATION_META] ?: false
         )
     }
@@ -176,8 +183,10 @@ class SettingsDataStore(private val context: Context) {
             prefs[Keys.AI_LOCAL_ONLY] = next.aiLocalProcessingOnly
             prefs[Keys.DARK_MODE] = next.darkModeEnabled
             prefs[Keys.ACCENT_PRESET] = next.accentColorPreset.name
+            prefs[Keys.MODE_COLOR_STYLE] = next.modeColorStyle.name
             prefs[Keys.HAPTICS] = next.hapticFeedbackEnabled
             prefs[Keys.ANIMATIONS] = next.animationsEnabled
+            prefs[Keys.LOW_END_MODE] = next.lowEndOptimizedMode
             prefs[Keys.LOCATION_META] = next.locationMetadataEnabled
         }
     }

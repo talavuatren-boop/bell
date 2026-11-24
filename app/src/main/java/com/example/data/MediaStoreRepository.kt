@@ -559,16 +559,67 @@ class MediaStoreRepository(
                 }
             }
 
+            // Persist URI permission if supported, otherwise copy to durable app storage
+            // so Android Photo Picker URIs never break after app restarts.
+            var durableUri = uri
+            val persisted = runCatching {
+                resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                true
+            }.getOrDefault(false)
+
+            if (!persisted && uri.scheme != "file") {
+                val ext = when {
+                    mime.contains("png") -> "png"
+                    mime.contains("webp") -> "webp"
+                    isVideo -> "mp4"
+                    else -> "jpg"
+                }
+                val importDir = File(context.filesDir, "imported_media").apply { mkdirs() }
+                val dest = File(importDir, "IMP_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(6)}.$ext")
+                val copied = runCatching {
+                    resolver.openInputStream(uri)?.use { input ->
+                        dest.outputStream().use { out ->
+                            input.copyTo(out, bufferSize = 64 * 1024)
+                            out.flush()
+                        }
+                    }
+                    dest.exists() && dest.length() > 0L
+                }.getOrDefault(false)
+                if (copied) {
+                    durableUri = Uri.fromFile(dest)
+                    sizeBytes = dest.length()
+                }
+            }
+
             val (w, h, dur) = if (isVideo) {
-                extractVideoMetadata(uri)
+                extractVideoMetadata(durableUri)
             } else {
                 val opts = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                resolver.openInputStream(uri)?.use { android.graphics.BitmapFactory.decodeStream(it, null, opts) }
-                Triple(opts.outWidth.coerceAtLeast(0), opts.outHeight.coerceAtLeast(0), 0L)
+                if (durableUri.scheme == "file" && durableUri.path != null) {
+                    android.graphics.BitmapFactory.decodeFile(durableUri.path, opts)
+                } else {
+                    resolver.openInputStream(durableUri)?.use { android.graphics.BitmapFactory.decodeStream(it, null, opts) }
+                }
+                val rawW = opts.outWidth.coerceAtLeast(0)
+                val rawH = opts.outHeight.coerceAtLeast(0)
+                val orient = runCatching {
+                    val exif = if (durableUri.scheme == "file" && durableUri.path != null) {
+                        ExifInterface(durableUri.path!!)
+                    } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                        resolver.openInputStream(durableUri)?.use { ExifInterface(it) }
+                    } else null
+                    exif?.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+                        ?: ExifInterface.ORIENTATION_NORMAL
+                }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
+                val swap = orient == ExifInterface.ORIENTATION_ROTATE_90 ||
+                    orient == ExifInterface.ORIENTATION_ROTATE_270 ||
+                    orient == ExifInterface.ORIENTATION_TRANSPOSE ||
+                    orient == ExifInterface.ORIENTATION_TRANSVERSE
+                if (swap) Triple(rawH, rawW, 0L) else Triple(rawW, rawH, 0L)
             }
 
             val entity = MediaAssetEntity(
-                mediaStoreUri = uri.toString(),
+                mediaStoreUri = durableUri.toString(),
                 mediaType = if (isVideo) MediaItemType.VIDEO.name else MediaItemType.PHOTO.name,
                 displayName = name,
                 width = w,

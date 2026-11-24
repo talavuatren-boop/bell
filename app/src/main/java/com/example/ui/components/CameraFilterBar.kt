@@ -1,10 +1,9 @@
 package com.example.ui.components
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -80,15 +79,23 @@ enum class FilterShelfTab(val label: String, val isLeicaDot: Boolean) {
     LEICA("Leica", true),
     STANDARD("Thường", false);
 
-    fun filterPresets(): List<PhotoFilterPreset> = when (this) {
-        ALL -> PhotoFilterPreset.entries
-        LEICA_WARM -> listOf(PhotoFilterPreset.NATURAL) +
-            PhotoFilterPreset.entries.filter { it.isLeica && it.isWarm }
-        LEICA -> listOf(PhotoFilterPreset.NATURAL) +
-            PhotoFilterPreset.entries.filter { it.category == FilterCategory.LEICA }
-        STANDARD -> listOf(PhotoFilterPreset.NATURAL) +
-            PhotoFilterPreset.entries.filter { it.category == FilterCategory.FILM }
+    val cachedPresets: List<PhotoFilterPreset> by lazy {
+        when (this) {
+            ALL -> PhotoFilterPreset.entries
+            LEICA_WARM -> listOf(PhotoFilterPreset.NATURAL) +
+                PhotoFilterPreset.entries.filter { it.isLeica && it.isWarm }
+            LEICA -> listOf(PhotoFilterPreset.NATURAL) +
+                PhotoFilterPreset.entries.filter { it.category == FilterCategory.LEICA }
+            STANDARD -> listOf(PhotoFilterPreset.NATURAL) +
+                PhotoFilterPreset.entries.filter { it.category == FilterCategory.FILM }
+        }
     }
+
+    val displayCount: Int by lazy {
+        if (this == ALL) PhotoFilterPreset.entries.size else (cachedPresets.size - 1).coerceAtLeast(0)
+    }
+
+    fun filterPresets(): List<PhotoFilterPreset> = cachedPresets
 }
 
 private object FilterSamplePreviewCache {
@@ -103,7 +110,10 @@ private object FilterSamplePreviewCache {
             FilterSampleSubject.CAFE_ANALOG -> R.drawable.img_filter_cafe_coffee
             FilterSampleSubject.SCENIC_BLUE -> R.drawable.img_filter_scenic_blue
         }
-        val opts = BitmapFactory.Options().apply { inSampleSize = 4 }
+        val opts = BitmapFactory.Options().apply {
+            inSampleSize = 6
+            inPreferredConfig = Bitmap.Config.RGB_565
+        }
         val decoded = BitmapFactory.decodeResource(context.resources, resId, opts)?.asImageBitmap()
         if (decoded != null) {
             bitmapCache[subject] = decoded
@@ -228,7 +238,7 @@ fun CameraFilterBar(
                 ) {
                     FilterShelfTab.entries.forEach { tab ->
                         FilterGroupChip(
-                            label = "${tab.label} (${if (tab == FilterShelfTab.ALL) PhotoFilterPreset.entries.size else tab.filterPresets().size - 1})",
+                            label = "${tab.label} (${tab.displayCount})",
                             selected = shelfTab == tab,
                             isLeicaDot = tab.isLeicaDot,
                             onClick = { shelfTab = tab }
@@ -282,29 +292,14 @@ fun CameraFilterBar(
                     key = { it.name }
                 ) { preset ->
                     val selected = activeFilter == preset
-                    val interaction = remember(preset) { MutableInteractionSource() }
-                    val swatchScale by animateFloatAsState(
-                        targetValue = if (selected && animEnabled) 1.05f else 1f,
-                        animationSpec = if (animEnabled) HungCamMotion.bouncySpringFloat else tween(0),
-                        label = "swatchScale_${preset.name}"
-                    )
-                    val cardBg by animateColorAsState(
-                        targetValue = if (selected) accent.copy(alpha = 0.16f) else Color.Transparent,
-                        animationSpec = tween(160),
-                        label = "swatchBg_${preset.name}"
-                    )
+                    val cardBg = if (selected) accent.copy(alpha = 0.16f) else Color.Transparent
 
                     Column(
                         modifier = Modifier
                             .width(68.dp)
-                            .springPressScale(interaction, pressedScale = 0.90f, extraScale = swatchScale)
                             .clip(RoundedCornerShape(14.dp))
                             .background(cardBg)
-                            .clickable(
-                                interactionSource = interaction,
-                                indication = null,
-                                enabled = !isRecording
-                            ) {
+                            .clickable(enabled = !isRecording) {
                                 onSelectFilter(preset)
                             }
                             .padding(vertical = 5.dp, horizontal = 4.dp)

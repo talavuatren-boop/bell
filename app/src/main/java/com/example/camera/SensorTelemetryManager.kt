@@ -41,18 +41,25 @@ class SensorTelemetryManager(context: Context) : SensorEventListener {
     private var recordingGyro = false
     private val gyroSamples = ArrayList<GyroSample>(2048)
 
+    private var isStarted = false
+    private var lastEmitMs = 0L
+    private var lastEmittedRoll = 999f
+    private var lastEmittedPitch = 999f
+    private var lastEmittedAligned = false
+
     fun start() {
+        if (isStarted) return
+        isStarted = true
         rotationSensor?.let {
             sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI)
         } ?: gravitySensor?.let {
             sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI)
         }
-        gyroSensor?.let {
-            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME)
-        }
     }
 
     fun stop() {
+        isStarted = false
+        recordingGyro = false
         sensorManager.unregisterListener(this)
     }
 
@@ -61,9 +68,15 @@ class SensorTelemetryManager(context: Context) : SensorEventListener {
             gyroSamples.clear()
             recordingGyro = true
         }
+        gyroSensor?.let {
+            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME)
+        }
     }
 
     fun stopAndSaveGyroTrack(outputFile: File): String? {
+        gyroSensor?.let {
+            sensorManager.unregisterListener(this, it)
+        }
         val snapshot: List<GyroSample>
         synchronized(gyroSamples) {
             recordingGyro = false
@@ -122,6 +135,15 @@ class SensorTelemetryManager(context: Context) : SensorEventListener {
         smoothRoll += alpha * (rawRoll - smoothRoll)
         smoothPitch += alpha * (rawPitch - smoothPitch)
         val aligned = abs(smoothRoll) <= 1.2f || abs(abs(smoothRoll) - 90f) <= 1.2f
+        val now = android.os.SystemClock.elapsedRealtime()
+        val movedEnough = abs(smoothRoll - lastEmittedRoll) >= 0.45f ||
+            abs(smoothPitch - lastEmittedPitch) >= 0.45f ||
+            aligned != lastEmittedAligned
+        if (!movedEnough || (now - lastEmitMs < 55L && aligned == lastEmittedAligned)) return
+        lastEmitMs = now
+        lastEmittedRoll = smoothRoll
+        lastEmittedPitch = smoothPitch
+        lastEmittedAligned = aligned
         _orientation.value = OrientationState(
             rollDegrees = smoothRoll,
             pitchDegrees = smoothPitch,

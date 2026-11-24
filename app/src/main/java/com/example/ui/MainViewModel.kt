@@ -13,6 +13,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.camera.CameraEngine
 import com.example.camera.CameraRuntimeState
+import com.example.camera.DevicePerformanceProfile
 import com.example.camera.FocusPeakingOverlayData
 import com.example.camera.HardwareCapabilityDetector
 import com.example.camera.SensorTelemetryManager
@@ -90,9 +91,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val cameraEngine = CameraEngine(application, mediaRepo, sensorTelemetry)
     private val thermalGuard = ThermalAndMemoryGuard(application)
     private val videoProcessor = VideoProcessor(application)
+    val isLowEndDevice: Boolean = DevicePerformanceProfile.isLowEndHardware(application)
 
     val settings: StateFlow<HungCamSettings> = settingsStore.settingsFlow
         .stateIn(viewModelScope, SharingStarted.Eagerly, HungCamSettings())
+
+    val isLowEndSmoothActive: Boolean
+        get() = isLowEndDevice || settings.value.lowEndOptimizedMode
 
     val activeAssets: StateFlow<List<MediaAssetEntity>> = mediaRepo.activeAssets
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -164,6 +169,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _mergeProgress = MutableStateFlow(VideoMergeProgressState())
     val mergeProgress: StateFlow<VideoMergeProgressState> = _mergeProgress.asStateFlow()
 
+    private val _freeStorageMb = MutableStateFlow(0L)
+    val freeStorageMb: StateFlow<Long> = _freeStorageMb.asStateFlow()
+
     val telemetry: StateFlow<LiveTelemetryState> = combine(
         cameraEngine.histogramBins,
         cameraEngine.clippingStats,
@@ -180,7 +188,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             activeIso = metering.first,
             activeExposureNs = metering.second,
             livePhotoBufferHealth = cameraEngine.getLiveBufferHealth(),
-            freeStorageMb = mediaRepo.getAvailableStorageMb()
+            freeStorageMb = _freeStorageMb.value
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(3000), LiveTelemetryState())
 
@@ -193,6 +201,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         refreshCapabilities()
+        refreshStorageStats()
         startRecordingClockLoop()
         viewModelScope.launch {
             settings.collect { s ->
@@ -203,6 +212,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 syncSession()
             }
+        }
+    }
+
+    fun refreshStorageStats() {
+        viewModelScope.launch(Dispatchers.IO) {
+            _freeStorageMb.value = mediaRepo.getAvailableStorageMb()
         }
     }
 
@@ -501,8 +516,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectAssetForAiStudio(asset: MediaAssetEntity) {
         viewModelScope.launch {
+            val maxDim = if (isLowEndSmoothActive) 1150 else 1600
             val previewBmp = if (asset.typeEnum != MediaItemType.VIDEO) {
-                loadScaledBitmap(Uri.parse(asset.mediaStoreUri), 1600)
+                loadScaledBitmap(Uri.parse(asset.mediaStoreUri), maxDim)
             } else null
             _aiOutput.value = AiStudioOutputState(
                 selectedAsset = asset,
@@ -578,25 +594,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                     _aiProgress.value = _aiProgress.value.copy(isRunning = false, percent = 100, stage = "Saved enhanced video")
                 } else {
-                    val maxDim = when (effectiveMode) {
-                        AiProcessingMode.FAST -> 1440
-                        AiProcessingMode.BALANCED -> 2048
-                        AiProcessingMode.QUALITY -> 3000
+                    val maxDim = if (isLowEndSmoothActive) {
+                        when (effectiveMode) {
+                            AiProcessingMode.FAST -> 1080
+                            AiProcessingMode.BALANCED -> 1440
+                            AiProcessingMode.QUALITY -> 1800
+                        }
+                    } else {
+                        when (effectiveMode) {
+                            AiProcessingMode.FAST -> 1440
+                            AiProcessingMode.BALANCED -> 2048
+                            AiProcessingMode.QUALITY -> 2800
+                        }
                     }
                     val srcBmp = loadScaledBitmap(Uri.parse(asset.mediaStoreUri), maxDim)
-                        ?: throw IllegalStateException("Unable to decode selected image")
+                        ?: throw IllegalStateException("Không thể giải mã ảnh đã chọn")
 
                     val res = ImageProcessor.runAiTool(srcBmp, tool, effectiveMode) { pct, stage ->
                         _aiProgress.value = _aiProgress.value.copy(percent = pct, stage = stage)
                     }
-                    _aiOutput.value = _aiOutput.value.copy(
+                    val prevOut = _aiOutput.value
+                    val oldOrig = prevOut.originalPreviewBitmap
+                    val oldEnh = prevOut.enhancedPreviewBitmap
+                    if (oldEnh != null && oldEnh !== res.outputBitmap && oldEnh !== srcBmp && !oldEnh.isRecycled) {
+                        oldEnh.recycle()
+                    }
+                    if (oldOrig != null && oldOrig !== srcBmp && oldOrig !== res.outputBitmap && !oldOrig.isRecycled) {
+                        oldOrig.recycle()
+                    }
+                    _aiOutput.value = prevOut.copy(
                         originalPreviewBitmap = srcBmp,
                         enhancedPreviewBitmap = res.outputBitmap,
                         imageResult = res,
                         processingTimeMs = res.processingTimeMs,
                         savedCopySuccess = false
                     )
-                    _aiProgress.value = _aiProgress.value.copy(isRunning = false, percent = 100, stage = "Ready to compare & save")
+                    _aiProgress.value = _aiProgress.value.copy(isRunning = false, percent = 100, stage = "Sẵn sàng so sánh & lưu ảnh")
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 _aiProgress.value = AiProcessingProgress(isRunning = false, stage = "Cancelled by user")
